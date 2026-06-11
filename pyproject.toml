@@ -1,0 +1,49 @@
+[project]
+name = "vulnify"
+version = "0.3.0"
+description = "CVE ingestion + enrichment pipeline with an MCP server for AI agents."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "rich>=15.0.0",
+    "tqdm>=4.67.3",
+]
+
+[project.scripts]
+vulnify-gather = "vulnify.gather:run"
+vulnify-mcp = "vulnify.mcp:run"
+
+[project.urls]
+Homepage = "https://github.com/mez-0/vulnify"
+Repository = "https://github.com/mez-0/vulnify"
+
+[project.optional-dependencies]
+explore = [
+    "streamlit>=1.40.0",
+    "pandas>=2.2.0",
+    "plotly>=5.24.0",
+    "networkx>=3.3",
+    "pyvis>=0.3.2",
+]
+mcp = [
+    "mcp>=1.2",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["vulnify*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

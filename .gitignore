@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local data — pulled or generated at runtime, shipped via the release
+*.db
+*.db-wal
+*.db-shm
+*.db.zst
+*.json
+
+# Local env file (see .env.example)
+.env
+
+# Tooling state
+.claude/scheduled_tasks.lock
+.pytest_cache/
+*.db.bak
+
+# Internal /dev-suite planning docs — kept locally, not shipped publicly
+docs/features/
