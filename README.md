@@ -468,8 +468,6 @@ Each release ships:
   ready to serve immediately on first start. Decompress with
   `zstd -d vulnify.db.zst`.
 - **`schema.sql`** — the DDL, in case you only want the structure.
-- **`known_exploited_vulnerabilities.json`** — the CISA KEV catalog
-  snapshot used for that build.
 
 Tag scheme:
 
