@@ -280,6 +280,76 @@ class RepointTests(VendorIndexTestCase):
         self.assertEqual(repoint_sentinel_products(self.conn), 0)
 
 
+class PhaseTests(VendorIndexTestCase):
+    """The pipeline entry point, including its watermark write."""
+
+    def test_phase_builds_index_and_records_a_watermark(self) -> None:
+        import asyncio
+
+        from vulnify.providers.vendor_index import (
+            VENDOR_INDEX_PHASE,
+            refresh_vendor_index,
+        )
+
+        sentinel = self._vendor("")
+        self._vendor("arubanetworks")
+        product = self._product("ClearPass Policy Manager", sentinel)
+        self._cve(
+            "CVE-2020-0013",
+            product,
+            [self._cpe("arubanetworks", "clearpass", v) for v in ("6.9", "6.8")],
+        )
+        self.conn.commit()
+
+        rows, moved = asyncio.run(refresh_vendor_index(self.store))
+        self.assertEqual(moved, 1)
+        self.assertGreater(rows, 0)
+
+        completed, watermark = self.conn.execute(
+            "SELECT last_completed_at, last_watermark FROM pipeline_run WHERE phase = ?",
+            (VENDOR_INDEX_PHASE,),
+        ).fetchone()
+        self.assertTrue(str(completed))
+        self.assertEqual(str(watermark), f"{rows}:{moved}")
+
+        # The phase committed, so the repoint is durable across a reopen.
+        self.store.close()
+        reopened = SqliteCveStore(self.db_path)
+        self.addCleanup(reopened.close)
+        self.assertEqual(
+            reopened.connection.execute(
+                "SELECT v.name FROM product p JOIN vendor v ON v.vendor_id = p.vendor_id "
+                "WHERE p.product_id = ?",
+                (product,),
+            ).fetchone()[0],
+            "arubanetworks",
+        )
+
+    def test_phase_is_safe_to_re_run(self) -> None:
+        import asyncio
+
+        from vulnify.providers.vendor_index import refresh_vendor_index
+
+        sentinel = self._vendor("")
+        self._vendor("arubanetworks")
+        product = self._product("ClearPass Policy Manager", sentinel)
+        self._cve(
+            "CVE-2020-0014",
+            product,
+            [self._cpe("arubanetworks", "clearpass", v) for v in ("6.9", "6.8")],
+        )
+        self.conn.commit()
+
+        first_rows, first_moved = asyncio.run(refresh_vendor_index(self.store))
+        second_rows, second_moved = asyncio.run(refresh_vendor_index(self.store))
+        self.assertEqual(first_rows, second_rows)
+        self.assertEqual(first_moved, 1)
+        self.assertEqual(second_moved, 0)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM product").fetchone()[0], 1
+        )
+
+
 class MigrationHealTests(unittest.TestCase):
     """A shipped release DB must gain the index on first open, without a gather."""
 
