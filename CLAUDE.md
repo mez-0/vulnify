@@ -122,6 +122,26 @@ adding a provider or migration, follow the nearest existing test:
 Keep fetch logic separable from parse logic so parsers test against fixtures
 without hitting a URL.
 
+### What the hermetic suite cannot catch
+
+Hermeticism is the right call, but it means the suite runs against a handful of
+fixture rows and is **structurally blind to anything that only appears at corpus
+scale**. A green suite is not evidence a query change is correct or fast. Three
+bugs shipped past a passing suite in one sitting:
+
+- a shared placeholder product with 26,354 CPE slugs made a vendor search match
+  **every** vendor (144,237 rows instead of 640);
+- a CTE joined to `cve` was inlined as a view and re-ran per row — the query
+  never returned;
+- `list_vendors` took over 300s on a missing index, and 0.07s with it.
+
+So for any change to a query, an index, or a derived table, **also check it
+against the real `vulnify.db`** before calling it done: row counts against a
+known-answer case, and wall-clock on the *worst* case (a term matching nothing
+scans furthest — a rare vendor term was 300× slower than a common one). Add the
+scale-shaped failure back into the suite as a fixture once you've found it, which
+is what `tests/test_vendor_index.py` and the `VendorFilterTests` class do.
+
 ---
 
 ## Gotchas / load-bearing invariants
@@ -166,7 +186,26 @@ Get these wrong and things break *silently*:
 ## Releases
 
 Tag scheme: `vYYYY.MM.DD` = data snapshot; `vYYYY.MM.DD.N` = code patch on the
-same data. `pyproject.toml` version follows SemVer independently. Each release
-ships `vulnify.db.zst` (FTS5 pre-built), `schema.sql`, and the KEV JSON snapshot.
-**GitHub caps release assets at 2 GiB** — always ship the zstd'd DB, never the raw
-`.db`. See [README](README.md#releases).
+same data. A change that doesn't move the pinned cvelistV5 `ZIP_URL` is a `.N`
+patch, so the tag date stays on the *data* even when the work lands months later
+(`v2026.07.25.1` was cut on 2026-08-20). `pyproject.toml` version follows SemVer
+independently. Each release ships exactly two assets — `vulnify.db.zst` (FTS5
+**and** `product_cpe_vendor` pre-built, so consumers pay no first-start build
+cost) and `schema.sql`. **GitHub caps release assets at 2 GiB** — always ship the
+zstd'd DB, never the raw `.db`. See [README](README.md#releases).
+
+Cutting one — the DB is the deliverable, so verify it before it goes out:
+
+```bash
+sqlite3 vulnify.db "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA quick_check;"
+zstd -15 -T0 vulnify.db -o vulnify.db.zst   # ~24% ratio, ~40s on 8 cores
+zstd -t vulnify.db.zst                      # integrity, no disk needed
+gh release create vYYYY.MM.DD.N --title … --notes-file … \
+    vulnify.db.zst vulnify/db/schema.sql
+```
+
+Checkpoint first or the `.zst` can capture a DB with an un-merged WAL. Pull the
+release-note counts from the artefact you're actually shipping rather than
+copying the previous release's table forward — they drift (the `v2026.07.25`
+notes claimed KEV wasn't included when the DB held 1,653 listed CVEs). Delete the
+local `.zst` afterwards; it's ~480 MB and gitignored.
