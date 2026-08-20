@@ -466,9 +466,10 @@ Tests are hermetic — no network, no real DB. They cover:
 Each release ships:
 
 - **`vulnify.db.zst`** — the full SQLite DB, zstd-compressed. Includes the
-  FTS5 index pre-built from `v2026.05.21.1` onwards so `vulnify-mcp` is
-  ready to serve immediately on first start. Decompress with
-  `zstd -d vulnify.db.zst`.
+  FTS5 index pre-built from `v2026.05.21.1` onwards, and the
+  `product_cpe_vendor` vendor index pre-built from `v2026.07.25.1` onwards, so
+  `vulnify-mcp` is ready to serve immediately on first start rather than
+  spending ~40s building them. Decompress with `zstd -d vulnify.db.zst`.
 - **`schema.sql`** — the DDL, in case you only want the structure.
 
 Tag scheme:
