@@ -81,7 +81,7 @@ Structured filter, ordered `published DESC`. All params optional:
 
 | Param | Type | Meaning |
 |--|--|--|
-| `vendor` | str | case-insensitive substring on vendor name |
+| `vendor` | str | case-insensitive substring, resolved four ways — see below |
 | `product` | str | case-insensitive substring on product name |
 | `cwe` | str | exact CWE id, e.g. `CWE-79` |
 | `kev_only` | bool | only CISA-KEV-listed CVEs |
@@ -92,6 +92,48 @@ Structured filter, ordered `published DESC`. All params optional:
 
 Returns summary rows: `cve_id`, `title`, `summary` (≤500 chars), `published`,
 `max_cvss`, `severity`, `epss_score`, `kev_listed`.
+
+#### How the `vendor` filter resolves
+
+Matching `vendor.name` alone is not enough. Roughly **11% of `product` rows —
+touching 44% of all CVEs — are attributed to a single empty-named placeholder
+vendor**, because cvelistV5 CNAs routinely write `vendor: n/a` while still naming
+the product. No name substring can match `''`, so the obvious query returns a
+confident empty set. A CVE therefore matches `vendor=X` if **any** of:
+
+1. one of its `cve_vendor` edges names a vendor matching `X`;
+2. an affected product is *owned* by a vendor matching `X`;
+3. an affected product's own **name** contains `X` (`Aruba ClearPass Policy Manager`);
+4. an affected product's **CPE vendor slug** matches `X` (`cpe:2.3:a:arubanetworks:…`).
+
+Branch 4 reads `product_cpe_vendor` — see [SCHEMA.md](SCHEMA.md#applicability).
+
+**This is deliberately broad.** `vendor="vmware"` also returns Lenovo's
+"LXCI for VMware" and the Jenkins VMware plugin. For a vulnerability lookup an
+over-broad answer is recoverable and a false empty set is not, so the filter
+errs outward — the same under-claim discipline as the exploit tri-state.
+
+When both `vendor` and `product` are given they must describe the **same**
+affected product. (They used to be independent joins, so `vendor="cisco",
+product="ios"` matched a CVE that named Cisco and, separately, listed an Apple
+product called iOS.)
+
+Vendor spellings are whatever the CNA wrote, and duplicates are common
+(`Hewlett Packard Enterprise` vs `Hewlett Packard Enterprise (HPE)`). Use
+`list_vendors` to see what a term actually matches.
+
+### `list_vendors(query=None, limit=50) -> list[dict]`
+
+Vendor names with `cve_count`, `product_count`, and up to five `cpe_slugs` (NVD's
+normalised spellings for the same vendor). Ordered by `cve_count` descending; the
+placeholder vendor is always excluded.
+
+Use it to disambiguate a surprising result. `list_vendors("aruba")` returns only
+`Aruba.it` / `arubadev` / `Aruba` with 1–3 CVEs each — all the Italian hosting
+company — which is the signal that the network kit lives elsewhere.
+`list_vendors("hewlett")` then shows `Hewlett Packard Enterprise` carrying the
+`arubanetworks` CPE slug, tying the two together from the data rather than from a
+hardcoded alias list.
 
 ### `search_cves_text(query, limit=20) -> list[dict]`
 

@@ -360,8 +360,78 @@ def apply_sqlite_migrations(conn: sqlite3.Connection) -> None:
         cur.execute(
             "CREATE INDEX idx_version_range_ap ON version_range (affected_product_id)"
         )
+    # Product-id-leading counterpart to idx_affected_product_cve; the vendor
+    # filter resolves a product set and needs to walk it back to CVEs.
+    if not _index_exists(cur, "idx_affected_product_product"):
+        cur.execute(
+            "CREATE INDEX idx_affected_product_product "
+            "ON affected_product (product_id, cve_id)"
+        )
+    # cve_vendor's PK leads with cve_id, leaving per-vendor CVE counts to scan
+    # the whole table once per vendor.
+    if not _index_exists(cur, "idx_cve_vendor_vendor"):
+        cur.execute(
+            "CREATE INDEX idx_cve_vendor_vendor ON cve_vendor (vendor_id, cve_id)"
+        )
+
+    _ensure_product_cpe_vendor(conn)
 
     _ensure_fts5_index(conn)
+
+
+def _ensure_product_cpe_vendor(conn: sqlite3.Connection) -> None:
+    """
+    Create ``product_cpe_vendor`` and populate it from the CPE strings already
+    in the DB, so vendor lookups work against a shipped release database.
+
+    Derived purely from ``affected_product`` ⋈ ``cpe_match`` — no network — which
+    is what makes it safe to run here rather than only in the pipeline. Without
+    it, the ~11% of products owned by the empty sentinel vendor are unreachable
+    by any vendor-name filter (see :mod:`vulnify.db.vendor_index`).
+
+    Runs at most once per DB: guarded on the table being absent or empty, the
+    same shape as :func:`_ensure_fts5_index`. The pipeline's ``vendor_index``
+    phase keeps it fresh after that.
+    """
+    from vulnify.db.vendor_index import build_vendor_index
+
+    cur = conn.cursor()
+    fresh = not _table_exists(cur, "product_cpe_vendor")
+    if fresh:
+        cur.execute(
+            """
+            CREATE TABLE product_cpe_vendor (
+                product_id INTEGER NOT NULL,
+                slug TEXT NOT NULL,
+                n INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (product_id, slug),
+                FOREIGN KEY (product_id) REFERENCES product (product_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+    if not _index_exists(cur, "idx_product_cpe_vendor_slug"):
+        cur.execute(
+            "CREATE INDEX idx_product_cpe_vendor_slug ON product_cpe_vendor (slug)"
+        )
+
+    if not _table_exists(cur, "cpe_match"):
+        return
+    cur.execute("SELECT COUNT(*) FROM product_cpe_vendor")
+    if int(cur.fetchone()[0]) > 0:
+        return
+    cur.execute("SELECT 1 FROM cpe_match LIMIT 1")
+    if cur.fetchone() is None:
+        return
+
+    started = time.monotonic()
+    logger.info("Building product/CPE-vendor index (one-off)...")
+    build_vendor_index(conn)
+    conn.commit()
+    logger.info(
+        "Product/CPE-vendor index built in {elapsed:.1f}s",
+        elapsed=time.monotonic() - started,
+    )
 
 
 def _ensure_fts5_index(conn: sqlite3.Connection) -> None:

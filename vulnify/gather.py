@@ -29,6 +29,12 @@ async def main() -> None:
         help="Skip NVD bulk enrichment (~30 min without an API key, ~3 min with one).",
     )
     parser.add_argument(
+        "--skip-vendor-index",
+        action="store_true",
+        help="Skip the product/CPE-vendor index rebuild (a few seconds; leaves "
+        "vendor lookups stale for products with no cvelistV5 vendor).",
+    )
+    parser.add_argument(
         "--skip-osv",
         action="store_true",
         help="Skip OSV enrichment (concurrent backfill, <1h; incremental after).",
@@ -76,6 +82,7 @@ async def main() -> None:
             store,
             skip_kev=args.skip_kev,
             skip_nvd=args.skip_nvd,
+            skip_vendor_index=args.skip_vendor_index,
             skip_epss=args.skip_epss,
             skip_osv=args.skip_osv,
             skip_nuclei=args.skip_nuclei,

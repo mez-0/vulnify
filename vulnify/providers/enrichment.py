@@ -1,4 +1,4 @@
-"""Post–CVE-bulk enrichment: KEV catalog, NVD, EPSS, OSV, vendor stub."""
+"""Post–CVE-bulk enrichment: KEV catalog, NVD, vendor index, EPSS, OSV, vendor stub."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from vulnify.providers.exploit_ingest import (
 )
 from vulnify.providers.osv import enrich_all_osv
 from vulnify.providers.vendor_advisories import process_vendor_advisories
+from vulnify.providers.vendor_index import refresh_vendor_index
 from vulnify.settings import get_nvd_api_key
 
 if TYPE_CHECKING:
@@ -267,6 +268,7 @@ async def run_post_ingestion_enrichment(
     *,
     skip_kev: bool = False,
     skip_nvd: bool = False,
+    skip_vendor_index: bool = False,
     skip_epss: bool = False,
     skip_osv: bool = False,
     skip_nuclei: bool = False,
@@ -304,6 +306,14 @@ async def run_post_ingestion_enrichment(
     else:
         logger.info("Enriching all NVD...")
         await enrich_all_nvd(store)
+
+    # Straight after NVD: this is a pure rollup of ``affected_product`` ⋈
+    # ``cpe_match``, and NVD is the only phase that writes ``cpe_match``.
+    if skip_vendor_index:
+        logger.info("Vendor index: skipped (--skip-vendor-index)")
+    else:
+        logger.info("Refreshing product/CPE-vendor index...")
+        await refresh_vendor_index(store)
 
     if skip_epss:
         logger.info("EPSS: skipped (--skip-epss)")

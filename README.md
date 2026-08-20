@@ -39,8 +39,8 @@ Deeper references live in [`docs/`](docs/):
 
 - **[Data sources](docs/DATASOURCES.md)** — every upstream feed, endpoint, and licence.
 - **[Pipeline](docs/PIPELINE.md)** — ingestion → enrichment, watermarks/resume, the cascade+heal model, tri-state discipline.
-- **[Schema](docs/SCHEMA.md)** — the 20-table layout and query gotchas.
-- **[MCP server](docs/MCP.md)** — the 7 tools, per-agent setup, troubleshooting.
+- **[Schema](docs/SCHEMA.md)** — the 21-table layout and query gotchas.
+- **[MCP server](docs/MCP.md)** — the 8 tools, per-agent setup, troubleshooting.
 - **[Explorer](docs/EXPLORE.md)** — the Streamlit dashboard, tab by tab.
 
 ---
@@ -101,6 +101,7 @@ without re-ingesting:
 ```bash
 vulnify-gather --skip-ingestion        # don't re-download the CVEProject zip
 vulnify-gather --skip-nvd              # skip NVD bulk merge
+vulnify-gather --skip-vendor-index     # skip the product/CPE-vendor rollup
 vulnify-gather --skip-kev              # skip CISA KEV
 vulnify-gather --skip-epss             # skip EPSS batch
 vulnify-gather --skip-osv              # skip OSV per-CVE lookups
@@ -198,7 +199,7 @@ vulnify/
 │   │   ├── enrichment.py     # phase orchestrator
 │   │   └── enrichment_resume.py
 │   └── db/
-│       ├── schema.sql        # 20-table normalised schema + FTS5 index
+│       ├── schema.sql        # 21-table normalised schema + FTS5 index
 │       ├── sqlite_store.py   # connection + upsert API
 │       ├── readonly.py       # shared read-only sqlite3 helper
 │       ├── cve_upsert.py     # CVE/vendor/product writes
@@ -377,7 +378,8 @@ Edit `~/.cursor/mcp.json` (or the project-local `.cursor/mcp.json`):
 | Tool | What it does |
 |--|--|
 | `get_cve(cve_id)` | Full hydrated CVE record — CVSS, KEV, EPSS, exploits, references, CWEs, affected products, plus an `artefacts` evidence list. |
-| `search_cves(...)` | Filter by vendor / product / cwe / kev_only / min_cvss / min_epss / year. |
+| `search_cves(...)` | Filter by vendor / product / cwe / kev_only / min_cvss / min_epss / year. The `vendor` filter resolves four ways (vendor edge, product owner, product name, CPE vendor slug) — see [MCP.md](docs/MCP.md#how-the-vendor-filter-resolves). |
+| `list_vendors(query, limit)` | Vendor names with CVE / product counts and their NVD CPE slugs. Use it to disambiguate a vendor term before trusting an empty result. |
 | `exploits_for(cve_id)` | Concrete exploit artefacts (Nuclei / Exploit-DB / Metasploit) with source, stable id, url, and `exact`/`parsed` confidence. |
 | `references_for(cve_id, tag)` | Reference URLs with their tags, optionally filtered to one tag (e.g. `patch`, `exploit`). |
 | `list_kev(since, limit)` | Recent CISA KEV entries, newest first. |

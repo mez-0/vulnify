@@ -12,6 +12,7 @@ vulnify-gather
   └─ run_post_ingestion_enrichment
         ├─ kev          CISA Known Exploited Vulnerabilities
         ├─ nvd          NVD 2.0: CVSS, CPE, status, refs (incremental)
+        ├─ vendor_index product_cpe_vendor rollup (local; needs nvd's cpe_match)
         ├─ epss         EPSS probability + percentile (batched)
         ├─ osv          OSV package mappings (per-CVE)
         ├─ nuclei       Nuclei templates   ┐
@@ -33,8 +34,8 @@ uv run vulnify-gather --skip-nvd # re-run everything except NVD
 Skip flags (each maps to one phase; all idempotent):
 
 ```
--s / --skip-ingestion   --skip-kev    --skip-nvd    --skip-epss
---skip-osv    --skip-nuclei    --skip-exploitdb    --skip-metasploit
+-s / --skip-ingestion   --skip-kev    --skip-nvd    --skip-vendor-index
+--skip-epss   --skip-osv    --skip-nuclei    --skip-exploitdb    --skip-metasploit
 ```
 
 A cold build without an NVD API key takes **hours** — NVD's public rate limit
@@ -60,6 +61,11 @@ phase reads its own watermark and only does new work:
   repeated.
 - **Exploit sources** store the corpus version (Nuclei commit SHA, Exploit-DB /
   Metasploit content hash); an unmoved corpus skips the parse.
+- **vendor_index** is the exception: it records a watermark but **never resumes
+  from it**. It is a local rollup of `affected_product` ⋈ `cpe_match`, both of
+  which are cascade-wiped on re-ingest, and it is keyed by `product_id`. A full
+  rebuild costs seconds, so there is nothing to gain by skipping it and a
+  silently stale vendor index to lose. The watermark is for observability only.
 
 An interrupted run picks up where it left off — no phase redoes finished work
 just because a later phase crashed.
@@ -85,6 +91,18 @@ Enrichment data therefore does **not survive** a re-ingest. It **heals**:
 **Consequences for consumers:** don't assume enrichment rows persist across a
 re-ingest, and don't build long-lived external references to their integer
 primary keys — they're rebuilt with fresh ids. Query by `cve_id`.
+
+`vendor` and `product` rows are the exception: they hang off `vendor`, not `cve`,
+so the cascade never reaches them and they accumulate forever. That cuts both
+ways. A migration that *renames* or merges vendors is silently undone, because
+`ensure_vendor` keys on exact `lower(trim(name))` and re-inserts the original
+spelling straight back from the next gather's CVE JSON. And the `vendor_index`
+phase, which repoints placeholder-owned products onto the vendor their CPE
+evidence names, has to **merge** rather than `UPDATE`: `ensure_product` keys on
+`(vendor_id, name, component)`, so a moved product no longer matches the lookup
+and the next gather inserts a fresh duplicate under the placeholder — one per
+gather, indefinitely. Merging into the existing twin means the phase re-converges
+on each run instead of drifting.
 
 The exploit write path deliberately runs **outside** `CveUpsertRegistry`:
 artefacts are enrichment derived from external corpora, not part of the

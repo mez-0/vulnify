@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS cve_vendor (
     FOREIGN KEY (vendor_id) REFERENCES vendor (vendor_id)
 );
 
+-- The PK leads with cve_id, so "which CVEs does this vendor have" had no index
+-- and scanned the whole table -- once per vendor for any per-vendor aggregate.
+CREATE INDEX IF NOT EXISTS idx_cve_vendor_vendor ON cve_vendor (vendor_id, cve_id);
+
 CREATE TABLE IF NOT EXISTS product (
     product_id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL DEFAULT '',
@@ -61,6 +65,29 @@ CREATE TABLE IF NOT EXISTS affected_product (
 );
 
 CREATE INDEX IF NOT EXISTS idx_affected_product_cve ON affected_product (cve_id, product_id);
+
+-- Reverse of ``idx_affected_product_cve``: resolve a set of product ids to CVEs.
+-- The vendor filter needs this leg -- without it, "which CVEs touch these
+-- products" degrades to a full scan of affected_product.
+CREATE INDEX IF NOT EXISTS idx_affected_product_product ON affected_product (product_id, cve_id);
+
+-- Derived: the vendor component of every NVD CPE 2.3 string that lands on a
+-- product, with its occurrence count. Pure roll-up of ``affected_product`` ⋈
+-- ``cpe_match`` -- no network. Exists because ~11% of ``product`` rows are
+-- attributed to the empty sentinel vendor (cvelistV5 ``vendor: n/a``), which no
+-- vendor-name filter can ever reach; the CPE vendor slug is the only structured
+-- vendor signal for those. Rebuilt wholesale by the ``vendor_index`` phase (and
+-- by ``migrate._ensure_product_cpe_vendor`` for shipped DBs) because
+-- ``affected_product`` / ``cpe_match`` are cascade-wiped on re-ingest.
+CREATE TABLE IF NOT EXISTS product_cpe_vendor (
+    product_id INTEGER NOT NULL,
+    slug TEXT NOT NULL,
+    n INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (product_id, slug),
+    FOREIGN KEY (product_id) REFERENCES product (product_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_cpe_vendor_slug ON product_cpe_vendor (slug);
 
 CREATE TABLE IF NOT EXISTS version_range (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

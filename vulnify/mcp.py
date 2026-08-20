@@ -100,6 +100,95 @@ def _clamp_limit(limit: int) -> int:
     return limit
 
 
+# Every way a CVE can be tied to a vendor string, as SQL fragments over an
+# ``affected_product ap`` ⋈ ``product p`` row. Matching only ``cve_vendor``
+# (the historical behaviour, kept as the first branch below) silently misses the
+# ~44% of CVEs whose products are attributed to the empty sentinel vendor —
+# see :mod:`vulnify.db.vendor_index`.
+_VENDOR_VIA_PRODUCT = """(
+       lower(p.name) LIKE ?
+    OR p.vendor_id IN (SELECT vendor_id FROM vendor WHERE lower(name) LIKE ?)
+    OR EXISTS (SELECT 1 FROM product_cpe_vendor pcv
+                WHERE pcv.product_id = p.product_id AND lower(pcv.slug) LIKE ?)
+)"""
+
+_VENDOR_VIA_CVE = """EXISTS (
+    SELECT 1 FROM cve_vendor cv
+    JOIN vendor v ON v.vendor_id = cv.vendor_id
+    WHERE cv.cve_id = ap.cve_id AND lower(v.name) LIKE ?
+)"""
+
+
+def _vendor_product_predicate(
+    vendor: str | None, product: str | None
+) -> tuple[str, list[Any]]:
+    """
+    Build a ``c.cve_id IN (…)`` predicate resolving the vendor/product filters.
+
+    Three shapes, because the semantics differ:
+
+    * **both** — one pass anchored on ``affected_product``, so the vendor and
+      product predicates describe *the same* product. Joining them independently
+      (the old behaviour) matched a CVE that named Cisco and, separately, had an
+      Apple product called iOS.
+    * **vendor only** — a ``UNION`` over the four ways a vendor string can reach
+      a CVE.
+    * **product only** — the original predicate.
+
+    Emitted as an uncorrelated ``IN`` subquery rather than a joined CTE, and that
+    is a correctness-of-performance requirement, not a style choice. A CTE
+    holding a single ``SELECT`` is inlined as a view, so ``JOIN cte ON
+    cte.cve_id = c.cve_id`` re-evaluates the whole product scan **once per
+    ``cve`` row** — the vendor+product query never finished. An uncorrelated
+    ``IN`` subquery is computed once into a transient index on every SQLite
+    version (``MATERIALIZED`` would need ≥ 3.35, which we cannot assume).
+
+    :return: ``(where_fragment, params)``, both empty when neither filter is set.
+    :rtype: tuple[str, list[Any]]
+    """
+    if not vendor and not product:
+        return "", []
+
+    v_term = f"%{vendor.lower()}%" if vendor else None
+    p_term = f"%{product.lower()}%" if product else None
+
+    if vendor and product:
+        sql = f"""c.cve_id IN (
+    SELECT ap.cve_id
+    FROM affected_product ap
+    JOIN product p ON p.product_id = ap.product_id
+    WHERE lower(p.name) LIKE ?
+      AND ({_VENDOR_VIA_PRODUCT} OR {_VENDOR_VIA_CVE})
+)"""
+        return sql, [p_term, v_term, v_term, v_term, v_term]
+
+    if vendor:
+        # Resolve the vendor term to a small set of product ids first, then look
+        # those up in affected_product. The obvious alternative — scanning
+        # affected_product and testing each row's product — walks 520k rows and
+        # took 94s; this is sub-second because every leg is a narrow lookup.
+        sql = """c.cve_id IN (
+        SELECT cv.cve_id FROM cve_vendor cv
+        JOIN vendor v ON v.vendor_id = cv.vendor_id
+        WHERE lower(v.name) LIKE ?
+  UNION SELECT ap.cve_id FROM affected_product ap
+        WHERE ap.product_id IN (
+                SELECT product_id FROM product WHERE lower(name) LIKE ?
+          UNION SELECT product_id FROM product WHERE vendor_id IN (
+                    SELECT vendor_id FROM vendor WHERE lower(name) LIKE ?)
+          UNION SELECT product_id FROM product_cpe_vendor WHERE lower(slug) LIKE ?
+        )
+)"""
+        return sql, [v_term, v_term, v_term, v_term]
+
+    sql = """c.cve_id IN (
+    SELECT ap.cve_id FROM affected_product ap
+    JOIN product p ON p.product_id = ap.product_id
+    WHERE lower(p.name) LIKE ?
+)"""
+    return sql, [p_term]
+
+
 _ARTEFACT_COLUMNS = (
     "source",
     "stable_id",
@@ -183,8 +272,14 @@ def search_cves(
     Filter CVEs by structured criteria. All parameters are optional; the
     response is ordered by ``published DESC``.
 
-    :param vendor: Case-insensitive substring match on vendor name.
-    :param product: Case-insensitive substring match on product name.
+    :param vendor: Case-insensitive substring match, resolved against the CVE's
+        vendor edges, the owning vendor of any affected product, the product name
+        itself, and the vendor component of NVD's CPE strings. Deliberately
+        broad — a vendor filter that returns a confident empty set on a product
+        that has CVEs is the worst failure this tool can have. So
+        ``vendor="vmware"`` also matches Lenovo's "LXCI for VMware".
+    :param product: Case-insensitive substring match on product name. When
+        combined with ``vendor``, both must describe the *same* affected product.
     :param cwe: Exact CWE id, e.g. ``"CWE-79"``.
     :param kev_only: If True, only CVEs listed in CISA KEV.
     :param min_cvss: Minimum max-CVSS score (any version).
@@ -199,16 +294,10 @@ def search_cves(
     where: list[str] = []
     params: list[Any] = []
 
-    if vendor:
-        joins.append("JOIN cve_vendor cv ON cv.cve_id = c.cve_id")
-        joins.append("JOIN vendor v ON v.vendor_id = cv.vendor_id")
-        where.append("lower(v.name) LIKE ?")
-        params.append(f"%{vendor.lower()}%")
-    if product:
-        joins.append("JOIN affected_product ap ON ap.cve_id = c.cve_id")
-        joins.append("JOIN product p ON p.product_id = ap.product_id")
-        where.append("lower(p.name) LIKE ?")
-        params.append(f"%{product.lower()}%")
+    vp_sql, vp_params = _vendor_product_predicate(vendor, product)
+    if vp_sql:
+        where.append(vp_sql)
+        params.extend(vp_params)
     if cwe:
         joins.append("JOIN cve_cwe cw ON cw.cve_id = c.cve_id")
         where.append("cw.cwe_id = ?")
@@ -254,6 +343,69 @@ def search_cves(
     cur = store.connection.cursor()
     cur.execute(sql, params)
     return [_row_to_summary(r) for r in cur.fetchall()]
+
+
+@mcp.tool()
+def list_vendors(query: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    """
+    Vendor names in the DB, with how much each one actually owns.
+
+    Use this to disambiguate before or after a ``search_cves`` vendor filter.
+    Vendor spellings come from whatever the CNA wrote, so the obvious name is
+    often not the one in the data — ``list_vendors("aruba")`` shows that ``Aruba``
+    is the Italian hosting company while the network kit lives under
+    ``Hewlett Packard Enterprise``, and the ``cpe_slugs`` column shows NVD's
+    normalised spellings for the same vendor.
+
+    Ordered by ``cve_count`` descending. The placeholder vendor (empty name,
+    where CVEs whose CNA wrote ``vendor: n/a`` collect) is always excluded.
+
+    :param query: Case-insensitive substring on the vendor name. Omit to list
+        the biggest vendors overall.
+    :param limit: Max rows (1–100).
+    """
+    store = _get_store()
+    limit = _clamp_limit(limit)
+
+    where = "trim(COALESCE(v.name, '')) <> ''"
+    params: list[Any] = []
+    if query:
+        where += " AND lower(v.name) LIKE ?"
+        params.append(f"%{query.lower()}%")
+    params.append(limit)
+
+    cur = store.connection.cursor()
+    cur.execute(
+        f"""
+        SELECT v.name AS name,
+               (SELECT COUNT(DISTINCT cv.cve_id) FROM cve_vendor cv
+                 WHERE cv.vendor_id = v.vendor_id) AS cve_count,
+               (SELECT COUNT(*) FROM product p
+                 WHERE p.vendor_id = v.vendor_id) AS product_count,
+               (SELECT GROUP_CONCAT(s.slug) FROM (
+                    SELECT pcv.slug AS slug, SUM(pcv.n) AS evidence
+                    FROM product_cpe_vendor pcv
+                    JOIN product p2 ON p2.product_id = pcv.product_id
+                    WHERE p2.vendor_id = v.vendor_id
+                    GROUP BY pcv.slug
+                    ORDER BY evidence DESC, pcv.slug ASC LIMIT 5
+                ) s) AS cpe_slugs
+        FROM vendor v
+        WHERE {where}
+        ORDER BY cve_count DESC, v.name ASC
+        LIMIT ?
+        """,
+        params,
+    )
+    return [
+        {
+            "name": row["name"],
+            "cve_count": int(row["cve_count"] or 0),
+            "product_count": int(row["product_count"] or 0),
+            "cpe_slugs": str(row["cpe_slugs"]).split(",") if row["cpe_slugs"] else [],
+        }
+        for row in cur.fetchall()
+    ]
 
 
 @mcp.tool()

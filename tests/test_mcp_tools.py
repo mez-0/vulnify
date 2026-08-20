@@ -23,6 +23,9 @@ from vulnify.models.kev import KEVStatus
 from vulnify.models.threat_intel import ThreatIntel
 from vulnify.models.vendor import Vendor
 
+import vulnify.db.vendor_index as mcp_module_vendor_index
+from vulnify.db.vendor_index import rebuild_product_cpe_vendor
+
 import vulnify.mcp as mcp_module
 
 
@@ -330,6 +333,251 @@ class ExploitArtefactAndReferenceToolTests(unittest.TestCase):
         self.assertEqual(mcp_module.references_for("CVE-1999-9999"), [])
         self.assertEqual(
             mcp_module.references_for("CVE-2021-44228", tag="nonesuch"), []
+        )
+
+
+class VendorFilterTests(unittest.TestCase):
+    """The vendor filter, against a scale model of the Aruba/ClearPass corpus.
+
+    Reproduces the shape that made ``search_cves(vendor="aruba",
+    product="clearpass")`` return zero rows for a product with 152 CVEs: three
+    spellings of one product split across an empty placeholder vendor and HPE,
+    plus a genuine but unrelated vendor called ``Aruba`` (the Italian hosting
+    company) that a naive substring filter matches instead.
+
+    Seeds ``cpe_match`` and then runs the real
+    :func:`~vulnify.db.vendor_index.rebuild_product_cpe_vendor`, so the index
+    build is under test too rather than hand-stubbed.
+    """
+
+    def setUp(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        os.environ["VULNIFY_SCHEMA_SQL_PATH"] = str(
+            repo_root / "vulnify" / "db" / "schema.sql"
+        )
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = Path(tmp.name)
+        tmp.close()
+
+        self.store = SqliteCveStore(self.db_path)
+        conn = self.store.connection
+
+        self.vendors = {
+            name: self._vendor(name)
+            for name in ("", "Hewlett Packard Enterprise", "Aruba.it", "Dell")
+        }
+        # Product name carries the vendor token; its vendor is the placeholder.
+        self.p_named = self._product("Aruba ClearPass Policy Manager", "")
+        # Neither the product name nor its vendor names Aruba — CPE only.
+        self.p_cpe_only = self._product("ClearPass Policy Manager", "")
+        # Real vendor, but not one whose name contains "aruba".
+        self.p_hpe = self._product(
+            "ClearPass Policy Manager (CPPM)", "Hewlett Packard Enterprise"
+        )
+        self.p_hosting = self._product("Hosting Control Panel", "Aruba.it")
+        self.p_stray = self._product("iDRAC Service Module", "Dell")
+        self.p_placeholder = self._product("n/a", "")
+
+        # One CVE per branch of the vendor predicate.
+        self._cve("CVE-2020-0001", products=[self.p_named])
+        self._cve(
+            "CVE-2020-0002",
+            products=[self.p_cpe_only],
+            cpes=[
+                "cpe:2.3:a:arubanetworks:clearpass_policy_manager:6.9:*:*:*:*:*:*:*",
+                "cpe:2.3:a:arubanetworks:clearpass_policy_manager:6.8:*:*:*:*:*:*:*",
+            ],
+        )
+        self._cve(
+            "CVE-2020-0003",
+            products=[self.p_hpe],
+            vendors=[("Hewlett Packard Enterprise", "primary")],
+            cpes=[
+                "cpe:2.3:a:arubanetworks:clearpass_policy_manager:6.7:*:*:*:*:*:*:*",
+                "cpe:2.3:a:arubanetworks:clearpass_policy_manager:6.6:*:*:*:*:*:*:*",
+            ],
+        )
+        # The name collision: a real vendor called Aruba, unrelated product.
+        self._cve(
+            "CVE-2020-0004",
+            products=[self.p_hosting],
+            vendors=[("Aruba.it", "primary")],
+        )
+        # A lone stray CPE occurrence must not make this a ClearPass/Aruba CVE.
+        self._cve(
+            "CVE-2020-0005",
+            products=[self.p_stray],
+            vendors=[("Dell", "primary")],
+            cpes=["cpe:2.3:a:arubanetworks:clearpass_policy_manager:6.5:*:*:*:*:*:*:*"],
+        )
+        # The cvelistV5 placeholder product: shared by everything, so its CPE
+        # evidence names far too many vendors to mean anything.
+        self._cve(
+            "CVE-2020-0006",
+            products=[self.p_placeholder],
+            cpes=[
+                f"cpe:2.3:a:vendor{i}:thing:1.0:*:*:*:*:*:*:*"
+                for i in range(mcp_module_vendor_index.MAX_SLUGS_PER_PRODUCT + 4)
+            ]
+            + ["cpe:2.3:a:arubanetworks:clearpass_policy_manager:1:*:*:*:*:*:*:*"],
+        )
+
+        rebuild_product_cpe_vendor(conn)
+        conn.commit()
+        mcp_module._store = self.store
+
+    def tearDown(self) -> None:
+        mcp_module._store = None
+        self.store.close()
+        self.db_path.unlink(missing_ok=True)
+
+    # -- fixture helpers ---------------------------------------------------
+
+    def _vendor(self, name: str) -> int:
+        cur = self.store.connection.execute(
+            "INSERT INTO vendor (name, website, country) VALUES (?, '', '')", (name,)
+        )
+        return int(cur.lastrowid)
+
+    def _product(self, name: str, vendor_name: str) -> int:
+        cur = self.store.connection.execute(
+            "INSERT INTO product (name, vendor_id, product_type, family, component) "
+            "VALUES (?, ?, 'application', '', '')",
+            (name, self.vendors[vendor_name]),
+        )
+        return int(cur.lastrowid)
+
+    def _cve(
+        self,
+        cve_id: str,
+        *,
+        products: list[int],
+        vendors: list[tuple[str, str]] | None = None,
+        cpes: list[str] | None = None,
+    ) -> None:
+        conn = self.store.connection
+        conn.execute(
+            "INSERT INTO cve (cve_id, title, summary, published, modified) "
+            "VALUES (?, ?, '', '2020-06-01T00:00:00+00:00', "
+            "'2020-06-01T00:00:00+00:00')",
+            (cve_id, f"Title {cve_id}"),
+        )
+        for product_id in products:
+            conn.execute(
+                "INSERT INTO affected_product (cve_id, product_id, affected) "
+                "VALUES (?, ?, 1)",
+                (cve_id, product_id),
+            )
+        for vendor_name, role in vendors or []:
+            conn.execute(
+                "INSERT INTO cve_vendor (cve_id, vendor_id, role) VALUES (?, ?, ?)",
+                (cve_id, self.vendors[vendor_name], role),
+            )
+        for criteria in cpes or []:
+            conn.execute(
+                "INSERT INTO cpe_match (cve_id, criteria, match_criteria_id, "
+                "vulnerable) VALUES (?, ?, NULL, 1)",
+                (cve_id, criteria),
+            )
+
+    @staticmethod
+    def _ids(rows: list[dict]) -> set[str]:
+        return {r["cve_id"] for r in rows}
+
+    # -- the reported bug --------------------------------------------------
+
+    def test_vendor_plus_product_finds_every_spelling(self) -> None:
+        """The regression test for the filed bug: this used to return zero."""
+        found = self._ids(
+            mcp_module.search_cves(vendor="aruba", product="clearpass", limit=100)
+        )
+        self.assertEqual(found, {"CVE-2020-0001", "CVE-2020-0002", "CVE-2020-0003"})
+
+    # -- each branch must rescue a CVE the others cannot -------------------
+
+    def test_branch_product_name(self) -> None:
+        self.assertIn("CVE-2020-0001", self._ids(mcp_module.search_cves(vendor="aruba")))
+
+    def test_branch_cpe_slug(self) -> None:
+        """Placeholder vendor, product name without the vendor token."""
+        self.assertIn("CVE-2020-0002", self._ids(mcp_module.search_cves(vendor="aruba")))
+
+    def test_branch_product_ownership(self) -> None:
+        found = self._ids(mcp_module.search_cves(vendor="hewlett"))
+        self.assertIn("CVE-2020-0003", found)
+
+    def test_branch_cve_vendor_edge_still_works(self) -> None:
+        """The original behaviour is preserved as one branch among four."""
+        self.assertIn("CVE-2020-0004", self._ids(mcp_module.search_cves(vendor="aruba.it")))
+
+    # -- correlation -------------------------------------------------------
+
+    def test_vendor_and_product_must_describe_the_same_product(self) -> None:
+        """Dell owns no ClearPass product, so this must be empty.
+
+        The old independent joins matched whenever a CVE had *some* vendor edge
+        and, separately, *some* matching product.
+        """
+        self.assertEqual(
+            mcp_module.search_cves(vendor="dell", product="clearpass", limit=100), []
+        )
+
+    def test_unrelated_vendor_of_same_name_is_not_a_clearpass_hit(self) -> None:
+        found = self._ids(
+            mcp_module.search_cves(vendor="aruba", product="clearpass", limit=100)
+        )
+        self.assertNotIn("CVE-2020-0004", found)
+
+    # -- evidence quality guards ------------------------------------------
+
+    def test_single_cpe_occurrence_is_not_vendor_evidence(self) -> None:
+        """One stray CPE must not re-badge Dell's product as Aruba's."""
+        self.assertNotIn("CVE-2020-0005", self._ids(mcp_module.search_cves(vendor="aruba")))
+
+    def test_placeholder_product_is_excluded_from_the_index(self) -> None:
+        """A product naming too many CPE vendors would match every vendor term.
+
+        Without this guard the shared ``n/a`` product made a search for ``aruba``
+        return 144,237 CVEs against the real corpus instead of a few hundred.
+        """
+        rows = self.store.connection.execute(
+            "SELECT COUNT(*) FROM product_cpe_vendor WHERE product_id = ?",
+            (self.p_placeholder,),
+        ).fetchone()[0]
+        self.assertEqual(rows, 0)
+        self.assertNotIn("CVE-2020-0006", self._ids(mcp_module.search_cves(vendor="aruba")))
+
+    def test_rebuild_is_idempotent(self) -> None:
+        before = self.store.connection.execute(
+            "SELECT product_id, slug, n FROM product_cpe_vendor ORDER BY 1, 2"
+        ).fetchall()
+        rebuild_product_cpe_vendor(self.store.connection)
+        after = self.store.connection.execute(
+            "SELECT product_id, slug, n FROM product_cpe_vendor ORDER BY 1, 2"
+        ).fetchall()
+        self.assertEqual([tuple(r) for r in before], [tuple(r) for r in after])
+
+    # -- list_vendors ------------------------------------------------------
+
+    def test_list_vendors_excludes_the_placeholder(self) -> None:
+        names = {r["name"] for r in mcp_module.list_vendors(limit=100)}
+        self.assertNotIn("", names)
+        self.assertIn("Hewlett Packard Enterprise", names)
+
+    def test_list_vendors_disambiguates_the_collision(self) -> None:
+        """The affordance an agent needs to spot the wrong-company match."""
+        rows = mcp_module.list_vendors(query="aruba")
+        self.assertEqual([r["name"] for r in rows], ["Aruba.it"])
+        self.assertEqual(rows[0]["cve_count"], 1)
+
+    def test_list_vendors_reports_cpe_slugs(self) -> None:
+        rows = mcp_module.list_vendors(query="hewlett")
+        self.assertEqual(rows[0]["name"], "Hewlett Packard Enterprise")
+        self.assertIn("arubanetworks", rows[0]["cpe_slugs"])
+
+    def test_list_vendors_limit_clamped(self) -> None:
+        self.assertLessEqual(
+            len(mcp_module.list_vendors(limit=10_000)), mcp_module.MCP_MAX_LIMIT
         )
 
 

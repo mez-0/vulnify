@@ -1,6 +1,6 @@
 # Schema
 
-20 normalised tables plus an FTS5 virtual table. Foreign keys are enabled at the
+21 normalised tables plus an FTS5 virtual table. Foreign keys are enabled at the
 application layer (`PRAGMA foreign_keys = ON`) — the top-level `cve` row is the
 parent, and **every child table cascades on delete**. That cascade is
 load-bearing for the pipeline's persistence model (see
@@ -21,7 +21,12 @@ migrations and the FTS5 backfill live in `vulnify/db/migrate.py`.
 ## Vendors & products
 
 - **`vendor`** — deduped vendors; `UNIQUE` on `lower(trim(name))` so casing and
-  whitespace can't create duplicates.
+  whitespace can't create duplicates. **One row has an empty name and is a
+  sentinel**: the ingest rejects cvelistV5 vendors of `n/a`/`unknown`/`none` but
+  still writes the product, so every vendorless product collapses onto it (~11%
+  of `product`, touching 44% of CVEs). Exclude it from vendor-facing aggregates
+  with `trim(name) <> ''`, and never filter vendors by name alone — see
+  [MCP.md](MCP.md#how-the-vendor-filter-resolves).
 - **`cve_vendor`** — CVE ↔ vendor many-to-many with a `role`
   (`assigner` / `affected` / `source` / …). PK `(cve_id, vendor_id, role)`.
 - **`product`** — products owned by a vendor; `UNIQUE (vendor_id, name, component)`.
@@ -72,6 +77,17 @@ migrations and the FTS5 backfill live in `vulnify/db/migrate.py`.
   string), `match_criteria_id`, `vulnerable` flag. `cpe_match_unique`
   `(cve_id, criteria, match_criteria_id)` is created by the migration after
   deduping legacy rows.
+- **`product_cpe_vendor`** — **derived**: the vendor component of each CPE 2.3
+  string that lands on a product, with an occurrence count `n`. Recovers a vendor
+  for products stuck on the sentinel vendor, and powers branch 4 of the MCP
+  vendor filter. Rebuilt wholesale by the `vendor_index` phase, and once by
+  `migrate._ensure_product_cpe_vendor` so a shipped release DB heals on first
+  open. Two guards in `db/vendor_index.py` keep it honest: products naming more
+  than `MAX_SLUGS_PER_PRODUCT` vendors are dropped entirely (the shared `n/a`
+  product accumulates 26,354 slugs and would otherwise match every vendor), and
+  slugs below `MIN_SLUG_EVIDENCE` / `MIN_SLUG_SHARE` are ignored as strays.
+  **Never hand-edit it** — it is regenerated, and it is keyed by `product_id`, so
+  don't hold external references to those ids.
 
 ## References & tags
 
@@ -105,6 +121,9 @@ migrations and the FTS5 backfill live in `vulnify/db/migrate.py`.
   a CVE may have several vectors from different sources.
 - **KEV count:** `WHERE listed = 1`, never bare `COUNT(*)`.
 - **Reference tags:** join via `reference.id`, not a `cve_id` on `reference_tag`.
+- **Vendor filtering:** never `WHERE lower(v.name) LIKE …` on its own — the
+  sentinel vendor makes that silently under-return. Go through the four-branch
+  predicate in `mcp._vendor_product_predicate`.
 - **Exploit tri-state:** filter `public_poc IS NOT NULL` before treating the
   value as boolean, or you'll conflate "not assessed" with "none found".
 - Enrichment rows (`exploit_artefact`, `intel`, `cpe_match`, `cvss`, `kev`) are
