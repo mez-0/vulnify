@@ -5,12 +5,16 @@ from dataclasses import dataclass, field
 
 @dataclass(slots=True)
 class ThreatIntel:
-    epss_score: float = field(default_factory=float)
+    epss_score: float | None = None
     """
-    EPPs percentile model represents a EPPs percentile.
+    EPSS probability, or ``None`` when FIRST has not scored the CVE.
+
+    ⚠️ Never default this to ``0.0``: FIRST's floor is above zero, so ``0.0``
+    reads as "scored, negligible" when the truth is "not scored" — the same
+    collapse the exploit tri-state forbids.
     """
-    epss_percentile: float = field(default_factory=float)
-    
+    epss_percentile: float | None = None
+
     """
     Known actors model represents a list of known actors.
     """

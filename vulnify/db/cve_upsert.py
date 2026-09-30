@@ -523,10 +523,12 @@ class IntelUpsertStep:
                 INSERT INTO intel (cve_id, epss_score, epss_percentile)
                 VALUES (?, ?, ?)
                 ON CONFLICT(cve_id) DO UPDATE SET
-                    epss_score = excluded.epss_score,
-                    epss_percentile = excluded.epss_percentile
+                    epss_score = COALESCE(excluded.epss_score, intel.epss_score),
+                    epss_percentile = COALESCE(excluded.epss_percentile, intel.epss_percentile)
                 """,
-                (cve_id, float(ti.epss_score), float(ti.epss_percentile)),
+                # NULL = not scored. COALESCE so a document carrying no score
+                # never erases one the EPSS phase already wrote.
+                (cve_id, ti.epss_score, ti.epss_percentile),
             )
         if not ctx.policy.intel_string_lists:
             return

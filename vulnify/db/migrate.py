@@ -242,6 +242,26 @@ def _drop_orphan_empty_vendor(conn: sqlite3.Connection) -> None:
     )
 
 
+def _null_unscored_epss(conn: sqlite3.Connection) -> None:
+    """
+    Turn ``0.0 / 0.0`` EPSS rows back into ``NULL`` (not scored).
+
+    Older ingests defaulted every CVE's EPSS to ``0.0`` and only the CVEs FIRST
+    scored were overwritten, so "not scored" read as "scored, negligible". A
+    real EPSS score is never exactly zero on both axes, so the pair identifies
+    the default. Not undone by a later gather: the write path now writes NULL.
+    """
+    cur = conn.cursor()
+    if not _table_exists(cur, "intel"):
+        return
+    cur.execute(
+        """
+        UPDATE intel SET epss_score = NULL, epss_percentile = NULL
+        WHERE epss_score = 0 AND epss_percentile = 0
+        """
+    )
+
+
 def apply_sqlite_migrations(conn: sqlite3.Connection) -> None:
     """
     Apply additive migrations after ``CREATE TABLE IF NOT EXISTS`` bootstrap.
@@ -344,6 +364,8 @@ def apply_sqlite_migrations(conn: sqlite3.Connection) -> None:
     _drop_orphan_empty_vendor(conn)
 
     _make_exploit_signals_nullable(conn)
+
+    _null_unscored_epss(conn)
 
     if not _index_exists(cur, "cpe_match_unique"):
         _dedupe_cpe_match(conn)

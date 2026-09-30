@@ -532,8 +532,8 @@ class SqliteCveStore:
 
         if intel_row:
             intel = ThreatIntel(
-                epss_score=float(intel_row["epss_score"] or 0.0),
-                epss_percentile=float(intel_row["epss_percentile"] or 0.0),
+                epss_score=intel_row["epss_score"],
+                epss_percentile=intel_row["epss_percentile"],
                 known_actors=known_actors,
                 malware_families=malware_families,
                 campaigns=campaigns,
