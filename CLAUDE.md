@@ -56,7 +56,7 @@ uv run vulnify-gather          # build/refresh the DB (ingest + enrich)
 uv run vulnify-mcp             # start the MCP server (stdio)
 uv run vulnify-mcp </dev/null  # smoke test — starts, exits clean on EOF
 uv run streamlit run explore/app.py
-uv run pytest                  # hermetic suite (currently 98 tests, ~7s)
+uv run pytest                  # hermetic suite (currently 116 tests, ~7s)
 ```
 
 Entry points: `vulnify-gather` → `vulnify.gather:run`, `vulnify-mcp` → `vulnify.mcp:run`.
@@ -64,7 +64,7 @@ Entry points: `vulnify-gather` → `vulnify.gather:run`, `vulnify-mcp` → `vuln
 Pipeline skip flags (each = one phase, all idempotent) — see [PIPELINE.md](docs/PIPELINE.md#running-it):
 
 ```
--s / --skip-ingestion   --skip-kev   --skip-nvd   --skip-vendor-index
+-s / --skip-ingestion   --skip-kev   --skip-nvd   --skip-placeholder-products   --skip-vendor-index
 --skip-epss   --skip-osv   --skip-nuclei   --skip-exploitdb   --skip-metasploit
 ```
 
@@ -84,6 +84,7 @@ vulnify/
 ├── providers/           # one flat file per source (kev, nvd, epss, osv, cveproject,
 │   │                    #   exploit_ingest [nuclei+edb+msf], vendor_advisories)
 │   ├── enrichment.py    # run_post_ingestion_enrichment — phase orchestrator
+│   ├── placeholder_products.py # phase — recover `n/a` product identity from CPE
 │   ├── vendor_index.py  # `vendor_index` phase — refresh the CPE-vendor rollup
 │   └── enrichment_resume.py
 └── db/
@@ -91,6 +92,7 @@ vulnify/
     ├── sqlite_store.py  # connection + upsert API (WAL, foreign_keys ON)
     ├── cve_upsert.py    # CVE/vendor/product write registry (delete-and-rebuild)
     ├── migrate.py       # idempotent additive migrations + FTS5 backfill
+    ├── placeholder_products.py # per-CVE CPE → (vendor, product) repoint
     ├── vendor_index.py  # product_cpe_vendor build + sentinel-vendor repoint
     ├── pipeline_state.py# per-phase watermark read/write
     ├── readonly.py      # read-only sqlite helper (NOTE: currently unused by mcp.py)

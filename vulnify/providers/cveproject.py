@@ -20,7 +20,7 @@ from vulnify.models.reference import Reference
 from vulnify.models.vendor import Product, Vendor
 from vulnify.models.version import VersionRange
 
-ZIP_URL = "https://github.com/CVEProject/cvelistV5/releases/download/cve_2026-07-24_1500Z/2026-07-24_all_CVEs_at_midnight.zip.zip"
+ZIP_URL = "https://github.com/CVEProject/cvelistV5/releases/download/cve_2026-09-30_1200Z/2026-09-30_all_CVEs_at_midnight.zip.zip"
 
 LOCAL_ZIP_PATH = Path("/tmp/cveproject.zip")
 UNZIPPED_PATH = Path("/tmp/cveproject")
