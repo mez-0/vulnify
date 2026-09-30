@@ -19,8 +19,10 @@ exist.
 | **Exploit-DB** | `exploitdb` | `gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv` | `exploit_artefact` (`source=exploitdb`) → `public_poc` | Watermark = content hash |
 | **Metasploit** | `metasploit` | `raw.githubusercontent.com/rapid7/metasploit-framework/master/db/modules_metadata_base.json` | `exploit_artefact` (`source=metasploit`) → `metasploit` | Watermark = content hash |
 
-Exploit corpora are cached under `VULNIFY_CACHE_DIR` (default `~/.vulnify/cache`);
-an unmoved corpus is re-read from cache, not re-fetched.
+Exploit corpora are cached under `VULNIFY_CACHE_DIR` (default `~/.vulnify/cache`)
+and re-downloaded once the copy is a day old (`vulnify.http.fetch_cached`); a
+failed refresh falls back to the stale copy with a warning. The watermark is
+taken from the file actually parsed, so an unmoved corpus still skips the parse.
 
 ---
 
@@ -29,8 +31,9 @@ an unmoved corpus is re-read from cache, not re-fetched.
 The authoritative CVE record set (CNA-submitted). Ingested as a single bulk zip
 pulled from a **dated GitHub release** — the URL in `providers/cveproject.py`
 (`ZIP_URL`) is pinned to a specific snapshot date and must be bumped to refresh
-the base corpus. The zip is cached locally; a present cache file short-circuits
-re-download (the guard is at the call site, not in `http.py`).
+the base corpus. The zip and its extracted tree are cached in `/tmp`, each with
+a marker recording the `ZIP_URL` that produced it; a missing or different
+marker discards the cache, so bumping the pin always takes effect.
 
 Seeds the core graph: the CVE row, its vendors/products (deduped, case- and
 whitespace-normalised), affected-product version ranges, CWE weakness links,
@@ -54,9 +57,11 @@ cold build without a key takes hours; this phase is the bottleneck.
 ## CISA KEV
 
 The Known Exploited Vulnerabilities catalog — CVEs CISA has confirmed are
-exploited in the wild. Read from a **local JSON snapshot**
-(`VULNIFY_KEV_JSON_PATH`, default `known_exploited_vulnerabilities.json`), which
-ships as a release asset. Populates `date_added`, `due_date`, required action,
+exploited in the wild. Fetched from CISA's JSON feed into
+`VULNIFY_KEV_JSON_PATH` (default `known_exploited_vulnerabilities.json`) and
+refreshed once that copy is a day old. Merged into existing CVEs in place by
+direct SQL — never the delete-and-rebuild upsert, which would cascade away
+their exploit artefacts. Populates `date_added`, `due_date`, required action,
 ransomware flag, and vendor/product labels. The `kev` phase re-syncs in full;
 the watermark records the catalog version last ingested.
 

@@ -133,9 +133,9 @@ All config lives in `.env` at the project root (loaded by `vulnify.settings`).
 |--|:-:|--|--|
 | `VULNIFY_SQLITE_PATH` | yes | `vulnify.db` | Where the SQLite DB lives. Empty/unset switches the CVEProject ingest to print-only mode. |
 | `VULNIFY_SCHEMA_SQL_PATH` | yes | `vulnify/db/schema.sql` | DDL used to bootstrap a new DB. |
-| `VULNIFY_KEV_JSON_PATH` | no | `known_exploited_vulnerabilities.json` | Local copy of the CISA KEV catalog. If unset and the default file isn't present, the provider fetches it. |
+| `VULNIFY_KEV_JSON_PATH` | no | `known_exploited_vulnerabilities.json` | Where the CISA KEV catalog is cached. The KEV phase downloads it there and refreshes it once it is a day old. |
 | `VULNIFY_NVD_API_KEY` | no | — | NVD API key. Without it you're rate-limited to ~5 req / 30s. |
-| `VULNIFY_CACHE_DIR` | no | `~/.vulnify/cache` | Where the exploit corpora (Nuclei / Exploit-DB / Metasploit) are cached. |
+| `VULNIFY_CACHE_DIR` | no | `~/.vulnify/cache` | Where the exploit corpora (Nuclei / Exploit-DB / Metasploit) are cached; each is re-downloaded once a day old. |
 
 Relative paths are resolved against the project root.
 

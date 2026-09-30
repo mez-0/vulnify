@@ -56,7 +56,7 @@ uv run vulnify-gather          # build/refresh the DB (ingest + enrich)
 uv run vulnify-mcp             # start the MCP server (stdio)
 uv run vulnify-mcp </dev/null  # smoke test — starts, exits clean on EOF
 uv run streamlit run explore/app.py
-uv run pytest                  # hermetic suite (currently 116 tests, ~7s)
+uv run pytest                  # hermetic suite (currently 132 tests, ~7s)
 ```
 
 Entry points: `vulnify-gather` → `vulnify.gather:run`, `vulnify-mcp` → `vulnify.mcp:run`.
@@ -151,7 +151,9 @@ is what `tests/test_vendor_index.py` and the `VendorFilterTests` class do.
 Get these wrong and things break *silently*:
 
 - **`set_phase_state` does not commit.** The caller owns the transaction boundary — wrap it in the same `BEGIN`/`commit` as the row writes.
-- **`download_zip` has no built-in cache.** The "skip if already downloaded" guard is at the *call site* (see `cveproject.py`), not in `http.py`. `exploit_ingest.py` has its own per-source cache helper.
+- **Every upstream cache must know how old it is or where it came from.** `http.fetch_cached` expires a copy after a day (exploit corpora, KEV); the cvelistV5 zip is guarded at the call site in `cveproject.py` by a marker holding the `ZIP_URL` that produced it. A cache that is just "reuse the file if it exists" is a pin nobody chose — one shipped June exploit corpora in a September release.
+- **Enrichment merges into an existing CVE by direct SQL, never `get_cve` → `upsert_cve`.** The upsert deletes and rebuilds the CVE, and the model round-trip only restores what the model carries; `exploit_artefact` rows and `osv_checked` markers die. See `merge_nvd_cve_into_db` / `merge_kev_entry_into_db`.
+- **EPSS "not scored" is `NULL`, never `0.0`.** Same discipline as the exploit tri-state.
 - **Persistence is cascade + heal, not survival.** `DeleteCveRowStep` cascades a `DELETE FROM cve` to every child row (enrichment included). Data recovers because phases *re-run* post-ingestion. Don't assume enrichment rows survive a re-ingest, and don't hold external references to their integer PKs. Full model in [PIPELINE.md](docs/PIPELINE.md#persistence-cascade--heal).
 - **Exploit writes bypass `CveUpsertRegistry`** — artefacts are enrichment from external corpora, not the cvelistV5 document graph, so they're written via direct SQL.
 - **There is exactly one empty-named `vendor` row, and it is a sentinel.**
