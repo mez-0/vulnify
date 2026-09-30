@@ -26,6 +26,7 @@ from vulnify.providers.exploit_ingest import (
 )
 from vulnify.providers.osv import enrich_all_osv
 from vulnify.providers.vendor_advisories import process_vendor_advisories
+from vulnify.providers.placeholder_products import refresh_placeholder_products
 from vulnify.providers.vendor_index import refresh_vendor_index
 from vulnify.settings import get_nvd_api_key
 
@@ -269,6 +270,7 @@ async def run_post_ingestion_enrichment(
     skip_kev: bool = False,
     skip_nvd: bool = False,
     skip_vendor_index: bool = False,
+    skip_placeholder_products: bool = False,
     skip_epss: bool = False,
     skip_osv: bool = False,
     skip_nuclei: bool = False,
@@ -306,6 +308,17 @@ async def run_post_ingestion_enrichment(
     else:
         logger.info("Enriching all NVD...")
         await enrich_all_nvd(store)
+
+    # ⚠️ **Before the vendor index, not after.** This phase moves
+    # ``affected_product`` rows off the placeholder product, and the vendor
+    # index rolls CPE evidence up *per product_id* — so running it first means
+    # the index sees the corrected identities, and the placeholder product it
+    # has to exclude by size is that much smaller.
+    if skip_placeholder_products:
+        logger.info("Placeholder products: skipped (--skip-placeholder-products)")
+    else:
+        logger.info("Resolving placeholder product names from CPE...")
+        await refresh_placeholder_products(store)
 
     # Straight after NVD: this is a pure rollup of ``affected_product`` ⋈
     # ``cpe_match``, and NVD is the only phase that writes ``cpe_match``.

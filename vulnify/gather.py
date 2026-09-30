@@ -35,6 +35,12 @@ async def main() -> None:
         "vendor lookups stale for products with no cvelistV5 vendor).",
     )
     parser.add_argument(
+        "--skip-placeholder-products",
+        action="store_true",
+        help="Skip recovering product identity for CVEs whose CNA wrote a "
+        "placeholder product name (leaves them unreachable by product lookup).",
+    )
+    parser.add_argument(
         "--skip-osv",
         action="store_true",
         help="Skip OSV enrichment (concurrent backfill, <1h; incremental after).",
@@ -83,6 +89,7 @@ async def main() -> None:
             skip_kev=args.skip_kev,
             skip_nvd=args.skip_nvd,
             skip_vendor_index=args.skip_vendor_index,
+            skip_placeholder_products=args.skip_placeholder_products,
             skip_epss=args.skip_epss,
             skip_osv=args.skip_osv,
             skip_nuclei=args.skip_nuclei,
