@@ -1,4 +1,6 @@
 import asyncio
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -166,6 +168,59 @@ async def download_file(url: str, output_file_name: str) -> bool:
 
     logger.info(f"Downloaded {url} to {output_file_path}")
     return True
+
+
+#: How long a fetched upstream file may be reused before it is re-downloaded.
+#: Every source this is used for (exploit corpora, the KEV catalog) moves daily.
+CACHE_MAX_AGE_SEC = 24 * 60 * 60
+
+
+def cache_is_fresh(path: Path, max_age_sec: float = CACHE_MAX_AGE_SEC) -> bool:
+    """True when ``path`` exists and was written within ``max_age_sec``."""
+    try:
+        return time.time() - path.stat().st_mtime < max_age_sec
+    except OSError:
+        return False
+
+
+async def fetch_cached(
+    url: str,
+    dest: Path,
+    *,
+    max_age_sec: float = CACHE_MAX_AGE_SEC,
+    force: bool = False,
+) -> Path | None:
+    """
+    Return ``dest``, re-downloading it when it is missing, stale, or ``force``.
+
+    🚨 **A cache without an expiry is a pin nobody chose.** The exploit-corpus
+    cache used to be reused while it existed, and a release built in September
+    shipped June corpora. Staleness is judged by mtime, and a download lands in
+    a ``.part`` file that replaces ``dest`` only when complete, so a failed
+    fetch never truncates a good copy.
+
+    On a failed refresh the stale copy is returned with a warning — an old
+    corpus whose watermark says what it is beats no corpus — and ``None`` only
+    when there is nothing on disk at all.
+
+    :param url: Upstream URL.
+    :param dest: Cache path.
+    :param max_age_sec: Reuse ``dest`` if younger than this.
+    :param force: Re-download regardless of age.
+    :return: A usable path, or ``None``.
+    """
+    if not force and cache_is_fresh(dest, max_age_sec):
+        logger.info(f"Using cached {dest} (fresh)")
+        return dest
+    part = dest.with_name(dest.name + ".part")
+    if await download_file(url, str(part)):
+        os.replace(part, dest)
+        return dest
+    part.unlink(missing_ok=True)
+    if dest.is_file():
+        logger.warning(f"Refresh of {url} failed; using stale cached {dest}")
+        return dest
+    return None
 
 
 async def download_zip(url: str, output_file_name: str) -> bool:

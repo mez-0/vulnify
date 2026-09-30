@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile
@@ -28,6 +29,23 @@ UNZIPPED_PATH.mkdir(parents=True, exist_ok=True)
 
 CVE_DIRECTORY = Path("/tmp/cveproject/cves")
 
+# 🚨 Which ``ZIP_URL`` produced the cached zip and the extracted tree. Without
+# them a leftover ``/tmp/cveproject*`` from an older pin is ingested silently
+# after ``ZIP_URL`` is bumped — the bump does nothing and says nothing.
+ZIP_SOURCE_MARKER = LOCAL_ZIP_PATH.with_name(LOCAL_ZIP_PATH.name + ".url")
+EXTRACT_SOURCE_MARKER = UNZIPPED_PATH / ".source_url"
+
+
+def _cache_matches(marker: Path, url: str) -> bool:
+    """True when ``marker`` records ``url`` as the source of the cached copy.
+
+    A missing marker is a mismatch: a copy of unknown origin is not reused.
+    """
+    try:
+        return marker.read_text(encoding="utf-8").strip() == url
+    except OSError:
+        return False
+
 
 async def process_cveproject(db_path: Path | None = None) -> bool:
     """
@@ -51,9 +69,13 @@ async def process_cveproject(db_path: Path | None = None) -> bool:
         logger.warning("No SQLite database path provided")
         return False
 
-    if not CVE_DIRECTORY.exists():
+    if not (CVE_DIRECTORY.exists() and _cache_matches(EXTRACT_SOURCE_MARKER, ZIP_URL)):
+        if CVE_DIRECTORY.exists():
+            logger.info(f"Discarding {UNZIPPED_PATH}: extracted from a different snapshot")
+        shutil.rmtree(UNZIPPED_PATH, ignore_errors=True)
         if not await _download_and_unpack_cve_zip():
             return False
+        EXTRACT_SOURCE_MARKER.write_text(ZIP_URL, encoding="utf-8")
 
     store = SqliteCveStore(sqlite_path)
 
@@ -480,11 +502,13 @@ async def _download_and_unpack_cve_zip() -> bool:
     :rtype: bool
     """
 
-    if LOCAL_ZIP_PATH.is_file():
+    if LOCAL_ZIP_PATH.is_file() and _cache_matches(ZIP_SOURCE_MARKER, ZIP_URL):
         logger.info(f"Using existing zip file {LOCAL_ZIP_PATH}")
     else:
+        ZIP_SOURCE_MARKER.unlink(missing_ok=True)
         if not await download_zip(ZIP_URL, str(LOCAL_ZIP_PATH)):
             return False
+        ZIP_SOURCE_MARKER.write_text(ZIP_URL, encoding="utf-8")
 
     if not _unzip_file(LOCAL_ZIP_PATH, UNZIPPED_PATH):
         return False
