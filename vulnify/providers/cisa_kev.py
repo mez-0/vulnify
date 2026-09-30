@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -18,9 +19,14 @@ from vulnify.models.exploit import ExploitInfo
 from vulnify.models.kev import KEVStatus
 from vulnify.models.reference import Reference
 from vulnify.models.vendor import Vendor
+from vulnify.http import fetch_cached
 from vulnify.settings import get_kev_catalog_path
 
 KEV_PIPELINE_PHASE = "kev"
+
+KEV_CATALOG_URL = (
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+)
 
 
 def _parse_iso_date(s: str | None) -> date:
@@ -50,7 +56,9 @@ def _ransomware_from_kev(value: str | None) -> bool:
     :return: True if the value is a ransomware, False otherwise.
     :rtype: bool
     """
-    return (value or "").strip().lower() == "yes"
+    # CISA publishes ``Known`` / ``Unknown``. Matching only ``yes`` (which the
+    # feed never emits) left the flag false on all 361 ransomware-linked KEVs.
+    return (value or "").strip().lower() in {"known", "yes"}
 
 
 def _references_from_notes(notes: str | None) -> list[Reference]:
@@ -164,6 +172,128 @@ def apply_cisa_kev_entry(cve: CVE, entry: dict) -> None:
         cve.primary_vendor = Vendor(name=vendor_p)
 
 
+def merge_kev_entry_into_db(store: SqliteCveStore, cur: sqlite3.Cursor, entry: dict) -> bool:
+    """
+    Merge one KEV entry into an existing CVE **in place**, by direct SQL.
+
+    🚨 **Not** ``get_cve`` → :func:`apply_cisa_kev_entry` → ``upsert_cve``. The
+    upsert deletes and rebuilds the CVE, and the model round-trip only restores
+    what the model carries — ``exploit_artefact`` rows and ``osv_checked``
+    markers are written outside the registry and died with every KEV refresh.
+    A daily catalog bump without an exploit re-parse stripped the exploit
+    evidence from exactly the CVEs most likely to have it (1,947 artefacts in
+    one run). Same reason, and same shape, as
+    :func:`vulnify.providers.nvd.merge_nvd_cve_into_db`.
+
+    Mirrors :func:`apply_cisa_kev_entry` field for field. Does not commit.
+
+    :return: True when the CVE existed and was updated; False means the caller
+        should create a stub.
+    """
+    cid = str(entry.get("cveID", "") or "").strip()
+    if not cid:
+        return False
+    cur.execute("SELECT 1 FROM cve WHERE cve_id = ?", (cid,))
+    if cur.fetchone() is None:
+        return False
+
+    vname = str(entry.get("vulnerabilityName", "") or "").strip()
+    short = str(entry.get("shortDescription", "") or "").strip()
+    vendor_p = str(entry.get("vendorProject", "") or "").strip()
+    product_l = str(entry.get("product", "") or "").strip()
+    notes_urls = str(entry.get("notes", "") or "").strip()
+    req = str(entry.get("requiredAction", "") or "").strip()
+
+    if vname:
+        cur.execute("UPDATE cve SET title = ? WHERE cve_id = ?", (vname, cid))
+    if short:
+        cur.execute(
+            "UPDATE cve SET summary = ?, technical_details = ? WHERE cve_id = ?",
+            (short, short, cid),
+        )
+
+    def _iso(raw: object) -> str:
+        d = _parse_iso_date(raw)  # type: ignore[arg-type]
+        return d.isoformat() if d != date.min else ""
+
+    cur.execute(
+        """
+        INSERT INTO kev (
+            cve_id, listed, date_added, due_date, notes, vulnerability_name,
+            required_action, vendor_project, product_label, short_description, source
+        ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'cisa')
+        ON CONFLICT(cve_id) DO UPDATE SET
+            listed = 1,
+            date_added = excluded.date_added,
+            due_date = excluded.due_date,
+            notes = excluded.notes,
+            vulnerability_name = excluded.vulnerability_name,
+            required_action = excluded.required_action,
+            vendor_project = excluded.vendor_project,
+            product_label = excluded.product_label,
+            short_description = excluded.short_description,
+            source = 'cisa'
+        """,
+        (cid, _iso(entry.get("dateAdded")), _iso(entry.get("dueDate")), notes_urls,
+         vname, req, vendor_p, product_l, short),
+    )
+    ransomware = 1 if _ransomware_from_kev(entry.get("knownRansomwareCampaignUse")) else 0
+    cur.execute(
+        "INSERT INTO exploit (cve_id, ransomware_usage, in_the_wild) VALUES (?, ?, 1) "
+        "ON CONFLICT(cve_id) DO UPDATE SET "
+        "ransomware_usage = excluded.ransomware_usage, in_the_wild = 1",
+        (cid, ransomware),
+    )
+
+    cwes_raw = entry.get("cwes")
+    if isinstance(cwes_raw, list):
+        for raw in cwes_raw:
+            cwe_id = str(raw or "").strip().upper()
+            if not cwe_id.startswith("CWE-"):
+                continue
+            cur.execute(
+                "INSERT INTO cwe (cwe_id, name, description) VALUES (?, '', '') "
+                "ON CONFLICT(cwe_id) DO NOTHING",
+                (cwe_id,),
+            )
+            cur.execute(
+                "INSERT OR IGNORE INTO cve_cwe (cve_id, cwe_id) VALUES (?, ?)",
+                (cid, cwe_id),
+            )
+
+    cur.execute("SELECT url FROM reference WHERE cve_id = ?", (cid,))
+    have_urls = {"" if r[0] is None else str(r[0]) for r in cur.fetchall()}
+    for ref in _references_from_notes(entry.get("notes")):
+        if ref.url in have_urls:
+            continue
+        have_urls.add(ref.url)
+        cur.execute(
+            "INSERT INTO reference (cve_id, url, source, title, trust) VALUES (?, ?, ?, '', ?)",
+            (cid, ref.url, ref.source, ref.trust.value),
+        )
+
+    # The model path replaced an empty primary vendor with ``vendorProject`` —
+    # for the 44% of CVEs on the sentinel vendor, KEV is the only name there is.
+    if vendor_p:
+        cur.execute(
+            "SELECT cv.vendor_id, trim(v.name) FROM cve_vendor cv "
+            "JOIN vendor v ON v.vendor_id = cv.vendor_id "
+            "WHERE cv.cve_id = ? AND cv.role = 'primary'",
+            (cid,),
+        )
+        primary = cur.fetchall()
+        if not any(name for _, name in primary):
+            cur.execute(
+                "DELETE FROM cve_vendor WHERE cve_id = ? AND role = 'primary'", (cid,))
+            vid = store.ensure_vendor(cur, Vendor(name=vendor_p))
+            cur.execute(
+                "INSERT OR IGNORE INTO cve_vendor (cve_id, vendor_id, role) "
+                "VALUES (?, ?, 'primary')",
+                (cid, vid),
+            )
+    return True
+
+
 def cisa_entry_to_stub_cve(entry: dict) -> CVE:
     """
     Build a minimal CVE when the ID is not yet in the database.
@@ -225,11 +355,19 @@ async def ingest_cisa_kev_catalog(
     :rtype: int
     """
 
-    path = catalog_path or get_kev_catalog_path()
-    if path is None:
-        logger.warning(
-            "CISA KEV catalog not found (set VULNIFY_KEV_JSON_PATH or add "
-            "known_exploited_vulnerabilities.json at project root)"
+    # 🚨 Fetched, not assumed present. The catalog used to be a file an operator
+    # had to drop in by hand; without it the phase warned and moved on, and
+    # since ingestion cascade-wipes ``kev``, a gather silently shipped a DB
+    # with almost no KEV rows.
+    path = (
+        catalog_path
+        if catalog_path is not None
+        else await fetch_cached(KEV_CATALOG_URL, get_kev_catalog_path())
+    )
+    if path is None or not path.is_file():
+        logger.error(
+            "CISA KEV catalog unavailable (download failed and no cached copy); "
+            "kev rows wiped by ingestion stay empty"
         )
         return 0
 
@@ -250,26 +388,27 @@ async def ingest_cisa_kev_catalog(
         return 0
 
     n = 0
+    stubs: list[dict] = []
+    conn = store.connection
+    cur = conn.cursor()
+    try:
+        for entry in tqdm(vulns, desc="CISA KEV", unit="entry"):
+            if not isinstance(entry, dict):
+                continue
+            if not str(entry.get("cveID", "") or "").strip():
+                continue
+            if not merge_kev_entry_into_db(store, cur, entry):
+                stubs.append(entry)
+            n += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
-    for entry in tqdm(vulns, desc="CISA KEV", unit="entry"):
-        if not isinstance(entry, dict):
-            continue
-
-        cid = str(entry.get("cveID", "") or "").strip()
-
-        if not cid:
-            continue
-
-        existing = store.get_cve(cid)
-
-        if existing:
-            apply_cisa_kev_entry(existing, entry)
-            store.upsert_cve(existing)
-        else:
-            stub = cisa_entry_to_stub_cve(entry)
-            store.upsert_cve(stub)
-
-        n += 1
+    # A CVE KEV lists but cvelistV5 lacks has nothing to lose to the upsert's
+    # delete, so the model path is fine here — and it owns its own transaction.
+    for entry in stubs:
+        store.upsert_cve(cisa_entry_to_stub_cve(entry))
 
     completed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     set_phase_state(
@@ -288,9 +427,11 @@ async def ingest_cisa_kev_catalog(
 
 
 __all__ = [
+    "KEV_CATALOG_URL",
     "KEV_PIPELINE_PHASE",
     "apply_cisa_kev_entry",
     "cisa_entry_to_stub_cve",
     "ingest_cisa_kev_catalog",
     "load_kev_catalog",
+    "merge_kev_entry_into_db",
 ]

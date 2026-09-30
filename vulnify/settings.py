@@ -45,20 +45,20 @@ def get_nvd_api_key() -> str | None:
     return raw or None
 
 
-def get_kev_catalog_path() -> Path | None:
+def get_kev_catalog_path() -> Path:
     """
-    CISA KEV JSON: ``VULNIFY_KEV_JSON_PATH`` (resolved from project root if relative),
-    else ``known_exploited_vulnerabilities.json`` at repo root when that file exists.
+    Where the CISA KEV JSON lives: ``VULNIFY_KEV_JSON_PATH`` (resolved from the
+    project root if relative), else ``known_exploited_vulnerabilities.json`` at
+    the repo root.
+
+    The path need not exist — the KEV phase downloads the catalog there and
+    refreshes it once it is a day old.
     """
     raw = os.environ.get(VULNIFY_KEV_JSON_PATH, "").strip()
-    if raw:
-        path = Path(raw)
-        if not path.is_absolute():
-            path = _PROJECT_ROOT / path
-        path = path.resolve()
-        return path if path.is_file() else None
-    default = _PROJECT_ROOT / _DEFAULT_KEV_FILENAME
-    return default if default.is_file() else None
+    path = Path(raw) if raw else Path(_DEFAULT_KEV_FILENAME)
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    return path.resolve()
 
 
 def get_cache_dir() -> Path:
