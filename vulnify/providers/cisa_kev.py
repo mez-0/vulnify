@@ -208,6 +208,7 @@ async def ingest_cisa_kev_catalog(
     store: SqliteCveStore,
     *,
     catalog_path: Path | None = None,
+    force: bool = False,
 ) -> int:
     """
     Upsert KEV rows for every entry in the CISA catalog.
@@ -216,6 +217,10 @@ async def ingest_cisa_kev_catalog(
     :type store: SqliteCveStore
     :param catalog_path: The path to the KEV catalog.
     :type catalog_path: Path | None
+    :param force: Ingest even when the catalog version matches the watermark.
+        Set when ingestion ran: the cascade wiped the ``kev`` rows, so an
+        unchanged catalog is no reason to skip restoring them.
+    :type force: bool
     :return: Number of entries processed.
     :rtype: int
     """
@@ -232,7 +237,7 @@ async def ingest_cisa_kev_catalog(
     catalog_version = str(data.get("catalogVersion", "") or "").strip()
 
     _, last_version = get_phase_state(store.connection, KEV_PIPELINE_PHASE)
-    if catalog_version and last_version == catalog_version:
+    if not force and catalog_version and last_version == catalog_version:
         logger.info(
             "CISA KEV: catalog unchanged (version={ver}); skipping ingest",
             ver=catalog_version,

@@ -11,7 +11,8 @@ vulnify-gather
   │
   └─ run_post_ingestion_enrichment
         ├─ kev          CISA Known Exploited Vulnerabilities
-        ├─ nvd          NVD 2.0: CVSS, CPE, status, refs (incremental)
+        ├─ nvd          NVD 2.0: CVSS, CPE, status, refs (incremental; full after an ingest)
+        ├─ placeholder_products  repoint `n/a` products onto their CPE identity (local)
         ├─ vendor_index product_cpe_vendor rollup (local; needs nvd's cpe_match)
         ├─ epss         EPSS probability + percentile (batched)
         ├─ osv          OSV package mappings (per-CVE)
@@ -59,8 +60,13 @@ phase reads its own watermark and only does new work:
 - **EPSS** refreshes stale scores.
 - **OSV** carries a per-CVE `osv_checked` marker, so completed lookups aren't
   repeated.
-- **Exploit sources** store the corpus version (Nuclei commit SHA, Exploit-DB /
+- **Exploit sources** store the corpus version (Nuclei tarball commit SHA, Exploit-DB /
   Metasploit content hash); an unmoved corpus skips the parse.
+- **NVD** ignores its watermark whenever ingestion ran this gather — see
+  [cascade + heal](#persistence-cascade--heal).
+- **placeholder_products** records a watermark but never resumes from it, for
+  the same reason as vendor_index below: it repoints `affected_product` rows
+  that the next ingest rebuilds onto the placeholder.
 - **vendor_index** is the exception: it records a watermark but **never resumes
   from it**. It is a local rollup of `affected_product` ⋈ `cpe_match`, both of
   which are cascade-wiped on re-ingest, and it is keyed by `product_id`. A full
@@ -85,6 +91,11 @@ Enrichment data therefore does **not survive** a re-ingest. It **heals**:
   where ingestion ran (unless a `--skip-*` flag overrides), restoring the wiped
   rows. Between the wipe and the heal, the summary bools read `null`, never a
   stale value.
+- **NVD** and **KEV** heal only because ingestion forces them past their
+  watermarks: NVD runs a full backfill and KEV re-ingests an unchanged catalog
+  whenever ingestion ran. Without that, an incremental NVD refresh re-fetches
+  only what *NVD* modified since, and the rest stays wiped — a gather after a
+  snapshot bump once left `cpe_match` at 169k rows of 1.3M.
 - **OSV** heals for free — the `osv_checked` marker cascade-dies with the CVE, so
   the CVE re-pends for the next OSV pass.
 

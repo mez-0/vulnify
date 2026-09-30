@@ -154,6 +154,17 @@ class KevCatalogVersionSkipTests(unittest.TestCase):
             )
         self.assertEqual(second, 0)
 
+    def test_force_reingests_an_unchanged_catalog(self) -> None:
+        """After an ingest the cascade has wiped ``kev``; the version skip must not fire."""
+        import asyncio
+
+        with SqliteCveStore(self.db_path) as store:
+            asyncio.run(ingest_cisa_kev_catalog(store, catalog_path=self.kev_path))
+            forced = asyncio.run(
+                ingest_cisa_kev_catalog(store, catalog_path=self.kev_path, force=True)
+            )
+        self.assertEqual(forced, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

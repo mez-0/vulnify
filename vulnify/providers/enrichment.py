@@ -196,7 +196,7 @@ async def _paginate_nvd(
     return updated
 
 
-async def enrich_all_nvd(store: SqliteCveStore) -> int:
+async def enrich_all_nvd(store: SqliteCveStore, *, full: bool = False) -> int:
     """
     Bulk-paginate the NVD 2.0 ``/cves/2.0`` listing and merge each record
     directly into the SQLite store.
@@ -208,8 +208,17 @@ async def enrich_all_nvd(store: SqliteCveStore) -> int:
     the gap exceeds NVD's 120-day cap. A daily cron typically pulls a few
     pages of deltas in seconds.
 
+    🚨 **The watermark is only valid while the rows it covers still exist.**
+    Ingestion cascade-wipes every re-ingested CVE's ``cpe_match`` / ``cvss`` /
+    NVD fields, and an incremental refresh only re-fetches CVEs *NVD* modified
+    since — so after an ingest it heals a fraction of what was wiped and leaves
+    the rest empty. Measured: a gather after a snapshot bump took ``cpe_match``
+    from 1.3M rows to 169k. Pass ``full=True`` whenever ingestion ran.
+
     :param store: The SQLite store to merge NVD records into.
     :type store: SqliteCveStore
+    :param full: Ignore the watermark and walk the entire listing.
+    :type full: bool
     :return: The number of CVE rows merged.
     :rtype: int
     """
@@ -219,8 +228,11 @@ async def enrich_all_nvd(store: SqliteCveStore) -> int:
     _, last_watermark = get_phase_state(store.connection, NVD_PIPELINE_PHASE)
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    if last_watermark is None:
-        logger.info("NVD bulk: no prior watermark; running full backfill")
+    if full or last_watermark is None:
+        logger.info(
+            "NVD bulk: {why}; running full backfill",
+            why="ingestion ran" if full else "no prior watermark",
+        )
         merged = await _paginate_nvd(store, delay)
     else:
         windows = _split_last_mod_windows(last_watermark, now_iso)
@@ -284,9 +296,11 @@ async def run_post_ingestion_enrichment(
     :param store: The SQLite store to enrich the NVD for.
     :type store: SqliteCveStore | None
     :param ingestion_ran: True when cvelistV5 ingestion ran this gather. Passed
-        to the exploit phases to suppress their corpus-version auto-skip (the
-        heal guard) — an ingest can cascade-wipe artefacts that must be restored
-        even on an unmoved corpus. Defaults True (the safe direction: re-parse
+        to every phase that can otherwise skip on a watermark — KEV (catalog
+        version), NVD (``lastModified``) and the exploit phases (corpus
+        version) — to suppress the skip (the heal guard): an ingest
+        cascade-wipes their rows, which must be restored even when the upstream
+        source has not moved. Defaults True (the safe direction: re-parse
         rather than risk a stale ``False``).
     :type ingestion_ran: bool
     :return: None
@@ -301,13 +315,13 @@ async def run_post_ingestion_enrichment(
         logger.info("CISA KEV: skipped (--skip-kev)")
     else:
         logger.info("Ingesting CISA KEV catalog...")
-        await ingest_cisa_kev_catalog(store)
+        await ingest_cisa_kev_catalog(store, force=ingestion_ran)
 
     if skip_nvd:
         logger.info("NVD: skipped (--skip-nvd)")
     else:
         logger.info("Enriching all NVD...")
-        await enrich_all_nvd(store)
+        await enrich_all_nvd(store, full=ingestion_ran)
 
     # ⚠️ **Before the vendor index, not after.** This phase moves
     # ``affected_product`` rows off the placeholder product, and the vendor
