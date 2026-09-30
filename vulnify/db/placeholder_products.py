@@ -41,6 +41,7 @@ runs as a phase on **every** gather, after the NVD phase that populates
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections import defaultdict
 
@@ -69,23 +70,51 @@ _DEGENERATE_SLUGS: frozenset[str] = frozenset({"", "*", "-", "n/a", "n\\a", "oth
 _MAX_DISTINCT_PRODUCTS = 1
 
 
+#: A CPE 2.3 component separator: a colon not escaped by a backslash.
+_CPE_SPLIT = re.compile(r"(?<!\\):")
+
+#: CPE 2.3 quoting — ``\+``, ``\&``, ``\:`` and friends stand for the bare
+#: character. Left in, ``ftp\+\+_server`` never matches a search for ``ftp++``.
+_CPE_UNQUOTE = re.compile(r"\\(.)")
+
+
 def _parse_cpe(criteria: str) -> tuple[str, str] | None:
     """Pull ``(vendor, product)`` out of a CPE 2.3 URI.
 
-    ``cpe:2.3:<part>:<vendor>:<product>:<version>:…`` — fixed positions, so a
-    split is enough and no regex is warranted.
+    ``cpe:2.3:<part>:<vendor>:<product>:<version>:…`` — fixed positions, but a
+    component may contain an escaped ``\\:``, so the split honours escapes and
+    the components are unquoted afterwards.
 
     :param criteria: The ``cpe_match.criteria`` value.
-    :returns: Lowercased ``(vendor, product)``, or ``None`` when either
-        component is absent or degenerate.
+    :returns: Lowercased, unquoted ``(vendor, product)``, or ``None`` when
+        either component is absent or degenerate.
     """
-    parts = criteria.split(":")
-    if len(parts) < 5 or not criteria.startswith("cpe:2.3:"):
+    if not criteria.startswith("cpe:2.3:"):
         return None
-    vendor, product = parts[3].strip().lower(), parts[4].strip().lower()
+    parts = _CPE_SPLIT.split(criteria)
+    if len(parts) < 5:
+        return None
+    vendor, product = (
+        _CPE_UNQUOTE.sub(r"\1", c).strip().lower() for c in (parts[3], parts[4])
+    )
     if vendor in _DEGENERATE_SLUGS or product in _DEGENERATE_SLUGS:
         return None
     return vendor, product
+
+
+def _humanise(slug: str) -> str:
+    """``palo_alto_networks`` → ``palo alto networks``.
+
+    CPE uses ``_`` for a space. Stored verbatim, the slug is unreachable by the
+    phrase a person actually types — ``LIKE '%internet explorer%'`` does not
+    match ``internet_explorer``.
+    """
+    return " ".join(slug.replace("_", " ").split())
+
+
+def _norm_key(name: str) -> str:
+    """Punctuation- and case-blind key: ``Hitachi Vantara`` ≡ ``hitachivantara``."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
 def _placeholder_product_ids(cur: sqlite3.Cursor) -> list[int]:
@@ -102,23 +131,73 @@ def _placeholder_product_ids(cur: sqlite3.Cursor) -> list[int]:
     ]
 
 
-def _ensure_vendor(cur: sqlite3.Cursor, name: str) -> int:
-    cur.execute("SELECT vendor_id FROM vendor WHERE lower(trim(name)) = ?", (name,))
-    if (row := cur.fetchone()) is not None:
-        return row[0]
-    cur.execute("INSERT INTO vendor (name) VALUES (?)", (name,))
-    return int(cur.lastrowid)
+class _IdentityResolver:
+    """Map a CPE ``(vendor, product)`` onto an existing row, else create one.
 
+    🚨 **Prefer the row that already exists.** A CPE slug is a second spelling
+    of a name cvelistV5 usually already has — ``hitachivantara`` for ``Hitachi
+    Vantara``. Minting a fresh vendor per slug would split one vendor in two,
+    and a search for the name people type would find only the half that was
+    already there. A punctuation-blind key catches the respelling; it is used
+    only when it names exactly **one** row, because a key shared by two rows
+    (``arisoft`` / ``ARI Soft``) is a coin toss, and the humanised spelling is
+    created or matched exactly instead.
+    """
 
-def _ensure_product(cur: sqlite3.Cursor, vendor_id: int, name: str) -> int:
-    cur.execute(
-        "SELECT product_id FROM product WHERE vendor_id = ? AND lower(trim(name)) = ?",
-        (vendor_id, name),
-    )
-    if (row := cur.fetchone()) is not None:
-        return row[0]
-    cur.execute("INSERT INTO product (name, vendor_id) VALUES (?, ?)", (name, vendor_id))
-    return int(cur.lastrowid)
+    def __init__(self, cur: sqlite3.Cursor) -> None:
+        self._cur = cur
+        self._vendors: dict[str, list[int]] = defaultdict(list)
+        cur.execute("SELECT vendor_id, name FROM vendor WHERE trim(name) <> ''")
+        for vid, name in cur.fetchall():
+            self._vendors[_norm_key(name)].append(vid)
+        self._products: dict[int, dict[str, list[int]]] = {}
+        self._cache: dict[tuple[str, str], int] = {}
+
+    def product_id(self, vendor_slug: str, product_slug: str) -> int:
+        key = (vendor_slug, product_slug)
+        if (hit := self._cache.get(key)) is None:
+            vendor_id = self._vendor_id(vendor_slug)
+            hit = self._cache[key] = self._product_id(vendor_id, product_slug)
+        return hit
+
+    def created_count(self) -> int:
+        return len(self._cache)
+
+    def _vendor_id(self, slug: str) -> int:
+        if len(ids := self._vendors.get(_norm_key(slug), [])) == 1:
+            return ids[0]
+        name = _humanise(slug)
+        self._cur.execute(
+            "SELECT vendor_id FROM vendor WHERE lower(trim(name)) = ?", (name,))
+        if (row := self._cur.fetchone()) is not None:
+            return row[0]
+        self._cur.execute("INSERT INTO vendor (name) VALUES (?)", (name,))
+        vid = int(self._cur.lastrowid)
+        self._vendors[_norm_key(name)].append(vid)
+        return vid
+
+    def _product_id(self, vendor_id: int, slug: str) -> int:
+        if (by_key := self._products.get(vendor_id)) is None:
+            by_key = self._products[vendor_id] = defaultdict(list)
+            self._cur.execute(
+                "SELECT product_id, name FROM product WHERE vendor_id = ?", (vendor_id,))
+            for pid, name in self._cur.fetchall():
+                if (name or "").strip().lower() not in PLACEHOLDER_PRODUCT_NAMES:
+                    by_key[_norm_key(name)].append(pid)
+        if len(ids := by_key.get(_norm_key(slug), [])) == 1:
+            return ids[0]
+        name = _humanise(slug)
+        self._cur.execute(
+            "SELECT product_id FROM product WHERE vendor_id = ? AND lower(trim(name)) = ?",
+            (vendor_id, name),
+        )
+        if (row := self._cur.fetchone()) is not None:
+            return row[0]
+        self._cur.execute(
+            "INSERT INTO product (name, vendor_id) VALUES (?, ?)", (name, vendor_id))
+        pid = int(self._cur.lastrowid)
+        by_key[_norm_key(name)].append(pid)
+        return pid
 
 
 def resolve_placeholder_products(conn: sqlite3.Connection) -> tuple[int, int]:
@@ -164,13 +243,10 @@ def resolve_placeholder_products(conn: sqlite3.Connection) -> tuple[int, int]:
         logger.info("placeholder products: nothing unambiguous to resolve")
         return 0, 0
 
-    product_ids: dict[tuple[str, str], int] = {}
+    identities = _IdentityResolver(cur)
     moved = 0
-    for cve_id, pair in resolved.items():
-        if (target := product_ids.get(pair)) is None:
-            vendor, product = pair
-            target = _ensure_product(cur, _ensure_vendor(cur, vendor), product)
-            product_ids[pair] = target
+    for cve_id, (vendor, product) in resolved.items():
+        target = identities.product_id(vendor, product)
         cur.execute(
             f"UPDATE affected_product SET product_id = ? "
             f"WHERE cve_id = ? AND product_id IN ({marks})",
@@ -181,7 +257,7 @@ def resolve_placeholder_products(conn: sqlite3.Connection) -> tuple[int, int]:
     logger.info(
         "placeholder products: repointed {} rows across {} CVEs onto {} identities "
         "({} left ambiguous)",
-        moved, len(resolved), len(product_ids), len(per_cve) - len(resolved),
+        moved, len(resolved), identities.created_count(), len(per_cve) - len(resolved),
     )
     return moved, len(resolved)
 

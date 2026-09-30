@@ -146,7 +146,50 @@ class TestResolution(_Base):
         self.assertEqual(self.cur.fetchone()[0], 1)
 
 
+class TestIdentityMatching(_Base):
+    """A CPE slug is a second spelling of a name the corpus usually has."""
+
+    def test_a_slug_is_stored_as_the_phrase_people_type(self):
+        self.seed("CVE-2024-0101", "n/a", "",
+                  ["cpe:2.3:a:palo_alto_networks:pan_os:*:*:*:*:*:*:*:*"])
+        resolve_placeholder_products(self.conn)
+        self.assertEqual(self.product_of("CVE-2024-0101"),
+                         [("pan os", "palo alto networks")])
+
+    def test_a_respelled_vendor_reuses_the_existing_row(self):
+        """``hitachivantara`` must land on ``Hitachi Vantara``, not split it."""
+        self.seed("CVE-2024-0102", "Pentaho", "Hitachi Vantara", [])
+        self.seed("CVE-2024-0103", "n/a", "",
+                  ["cpe:2.3:a:hitachivantara:pentaho:*:*:*:*:*:*:*:*"])
+        resolve_placeholder_products(self.conn)
+        self.assertEqual(self.product_of("CVE-2024-0103"),
+                         [("Pentaho", "Hitachi Vantara")])
+        self.cur.execute("SELECT count(*) FROM vendor WHERE name LIKE '%vantara%'")
+        self.assertEqual(self.cur.fetchone()[0], 1)
+
+    def test_an_ambiguous_respelling_matches_nothing_by_key(self):
+        """Two rows share the key, so the key picks neither."""
+        self.seed("CVE-2024-0104", "One", "arisoft", [])
+        self.seed("CVE-2024-0105", "Two", "ARI Soft", [])
+        self.seed("CVE-2024-0106", "n/a", "",
+                  ["cpe:2.3:a:ari-soft:three:*:*:*:*:*:*:*:*"])
+        resolve_placeholder_products(self.conn)
+        self.assertEqual(self.product_of("CVE-2024-0106"), [("three", "ari-soft")])
+
+    def test_cpe_quoting_is_removed(self):
+        self.seed("CVE-2024-0107", "n/a", "",
+                  [r"cpe:2.3:a:fastream:ftp\+\+_server:*:*:*:*:*:*:*:*"])
+        resolve_placeholder_products(self.conn)
+        self.assertEqual(self.product_of("CVE-2024-0107"),
+                         [("ftp++ server", "fastream")])
+
+
 class TestCpeParsing(unittest.TestCase):
+    def test_an_escaped_colon_does_not_shift_the_components(self):
+        self.assertEqual(
+            _parse_cpe(r"cpe:2.3:a:foo\:bar:baz:1.0:*:*:*:*:*:*:*"),
+            ("foo:bar", "baz"))
+
     def test_well_formed(self):
         self.assertEqual(
             _parse_cpe("cpe:2.3:a:examplecorp:exampleapp:1.0:*:*:*:*:*:*:*"),
