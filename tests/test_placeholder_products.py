@@ -176,6 +176,18 @@ class TestIdentityMatching(_Base):
         resolve_placeholder_products(self.conn)
         self.assertEqual(self.product_of("CVE-2024-0106"), [("three", "ari-soft")])
 
+    def test_a_cve_already_on_the_resolved_product_does_not_abort(self):
+        """``affected_product_unique`` must not turn a no-op into a crash."""
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS affected_product_unique "
+            "ON affected_product (cve_id, product_id)")
+        self.seed("CVE-2024-0108", "Pentaho", "Hitachi Vantara", [])
+        self.seed("CVE-2024-0108", "n/a", "",
+                  ["cpe:2.3:a:hitachivantara:pentaho:*:*:*:*:*:*:*:*"])
+        moved, _ = resolve_placeholder_products(self.conn)
+        self.assertEqual(moved, 0)
+        self.assertIn(("Pentaho", "Hitachi Vantara"), self.product_of("CVE-2024-0108"))
+
     def test_cpe_quoting_is_removed(self):
         self.seed("CVE-2024-0107", "n/a", "",
                   [r"cpe:2.3:a:fastream:ftp\+\+_server:*:*:*:*:*:*:*:*"])

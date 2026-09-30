@@ -247,8 +247,12 @@ def resolve_placeholder_products(conn: sqlite3.Connection) -> tuple[int, int]:
     moved = 0
     for cve_id, (vendor, product) in resolved.items():
         target = identities.product_id(vendor, product)
+        # 🚨 ``OR IGNORE``: ``affected_product_unique`` is (cve_id, product_id),
+        # and a CVE may already carry a real row on the resolved product. A
+        # plain UPDATE raises there and aborts the gather; the CVE is already
+        # reachable through that row, so leaving the placeholder row is free.
         cur.execute(
-            f"UPDATE affected_product SET product_id = ? "
+            f"UPDATE OR IGNORE affected_product SET product_id = ? "
             f"WHERE cve_id = ? AND product_id IN ({marks})",
             (target, cve_id, *placeholders),
         )
