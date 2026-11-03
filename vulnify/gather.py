@@ -26,12 +26,13 @@ async def main() -> None:
     parser.add_argument(
         "--skip-nvd",
         action="store_true",
-        help="Skip NVD bulk enrichment (~30 min without an API key, ~3 min with one).",
+        help="Skip NVD bulk enrichment (~1h without an API key on the 2026-11 "
+        "corpus; a key shortens the inter-page sleep, not the fetch and merge).",
     )
     parser.add_argument(
         "--skip-vendor-index",
         action="store_true",
-        help="Skip the product/CPE-vendor index rebuild (a few seconds; leaves "
+        help="Skip the product/CPE-vendor index rebuild (~1 min; leaves "
         "vendor lookups stale for products with no cvelistV5 vendor).",
     )
     parser.add_argument(
@@ -43,7 +44,8 @@ async def main() -> None:
     parser.add_argument(
         "--skip-osv",
         action="store_true",
-        help="Skip OSV enrichment (concurrent backfill, <1h; incremental after).",
+        help="Skip OSV enrichment (~3h after an ingest, which wipes the per-CVE "
+        "osv_checked markers; incremental on runs without one).",
     )
     parser.add_argument(
         "--skip-kev",
@@ -53,7 +55,7 @@ async def main() -> None:
     parser.add_argument(
         "--skip-epss",
         action="store_true",
-        help="Skip EPSS batch enrichment.",
+        help="Skip EPSS batch enrichment (~50 min; re-scores every CVE).",
     )
     parser.add_argument(
         "--skip-nuclei",

@@ -39,8 +39,23 @@ Skip flags (each maps to one phase; all idempotent):
 --skip-epss   --skip-osv    --skip-nuclei    --skip-exploitdb    --skip-metasploit
 ```
 
-A cold build without an NVD API key takes **hours** — NVD's public rate limit
-(~5 req / 30 s) is the bottleneck. A key raises it ~10×. See
+A full gather takes **about 5 hours** without an NVD API key. Measured on the
+2026-11-02 build (417,700 CVEs), with ingestion running:
+
+| Phase | Time |
+|-------|-----:|
+| cvelistV5 download + ingest | ~25 min |
+| NVD bulk (full backfill, no key) | ~63 min |
+| placeholder products | ~20 s |
+| vendor index | ~1 min |
+| EPSS | ~48 min |
+| **OSV** | **~2 h 45 min** |
+| Nuclei + Exploit-DB + Metasploit | ~1 min |
+
+OSV is the long pole after an ingest, not NVD: the ingest cascade-wipes every
+`osv_checked` marker, so all CVEs are re-queried. A gather without ingestion is
+much shorter. An NVD key raises NVD's rate limit ~10×, but only the inter-page
+sleep shrinks, not the fetch and merge time. See
 [DATASOURCES.md](DATASOURCES.md#nvd-20-api).
 
 **Print-only mode:** with `VULNIFY_SQLITE_PATH` empty/unset, the ingestion phase

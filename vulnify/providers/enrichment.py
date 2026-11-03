@@ -131,7 +131,8 @@ async def _paginate_nvd(
     pages = math.ceil(total / page_size)
     logger.info(
         "NVD bulk: {total:,} CVE records across {pages} page(s) "
-        "(~{eta_min:.0f} min at {delay:.2f}s/page)",
+        "(at least {eta_min:.0f} min: {delay:.2f}s sleep per page, before "
+        "fetch and merge time)",
         total=total,
         pages=pages,
         eta_min=(pages * delay) / 60.0,

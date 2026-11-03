@@ -88,7 +88,7 @@ def rebuild_product_cpe_vendor(conn: sqlite3.Connection) -> int:
 
     Wholesale rather than incremental on purpose: ``affected_product`` and
     ``cpe_match`` are both cascade-wiped and rebuilt when a CVE is re-ingested,
-    so any incremental bookkeeping would drift. A full rebuild is ~5s on the
+    so any incremental bookkeeping would drift. A full rebuild is ~30s on the
     full corpus and is trivially idempotent.
 
     The caller owns the transaction — this does not commit.

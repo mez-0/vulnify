@@ -52,7 +52,9 @@ pull CVEs modified since.
 **Rate limits:** ~5 requests / 30 s without a key; ~50 / 30 s with one. Set
 `VULNIFY_NVD_API_KEY` in `.env` (free from
 <https://nvd.nist.gov/developers/request-an-api-key>) for the ~10× speed-up. A
-cold build without a key takes hours; this phase is the bottleneck.
+full NVD backfill without a key took ~63 min on the 2026-11-02 corpus. OSV,
+not NVD, is the longest phase after an ingest; see
+[PIPELINE.md](PIPELINE.md#running-it).
 
 ## CISA KEV
 
