@@ -280,6 +280,33 @@ class RepointTests(VendorIndexTestCase):
         self.assertEqual(repoint_sentinel_products(self.conn), 0)
 
 
+class EvidenceWeightingTests(VendorIndexTestCase):
+    """Slug evidence is counted per CPE row, which is what drowns out platforms.
+
+    The shape is from the 2026-11-02 corpus: a hardware product whose CVEs each
+    carry many version rows for the real vendor and one ``runs on Windows`` row.
+    Counting distinct CVEs instead gives ``microsoft`` half the evidence here,
+    and on the real corpus made AMD CPUs answer a search for Microsoft.
+    """
+
+    def test_a_one_per_cve_platform_slug_does_not_survive(self) -> None:
+        amd = self._vendor("AMD")
+        ryzen = self._product("Ryzen PRO 3000 Series", amd)
+        for i in range(5):
+            versions = [self._cpe("amd", "ryzen_pro_3000", f"1.{v}") for v in range(25)]
+            platform = "cpe:2.3:o:microsoft:windows_10:-:*:*:*:*:*:*:*"
+            self._cve(f"CVE-2026-{9000 + i}", ryzen, versions + [platform])
+
+        rebuild_product_cpe_vendor(self.conn)
+        slugs = {
+            r[0]
+            for r in self.conn.execute(
+                "SELECT slug FROM product_cpe_vendor WHERE product_id = ?", (ryzen,)
+            )
+        }
+        self.assertEqual(slugs, {"amd"})
+
+
 class PhaseTests(VendorIndexTestCase):
     """The pipeline entry point, including its watermark write."""
 

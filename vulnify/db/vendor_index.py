@@ -43,6 +43,18 @@ MAX_SLUGS_PER_PRODUCT = 8
 # Within a kept product, ignore slugs holding less than this share of its
 # evidence. Kills strays — ``Aruba ClearPass Policy Manager`` carries
 # ``arubanetworks`` x337 alongside a stray ``microsoft`` x2 and ``apple`` x1.
+#
+# 🚨 Evidence is counted in CPE *rows*, not distinct CVEs, and that is
+# load-bearing. NVD writes one row per affected version range for the real
+# vendor but typically one "runs on" platform row (``microsoft:windows``,
+# ``linux:linux_kernel``) per CVE, so row-weighting is what drowns platforms out.
+# Counting distinct CVEs was trialled on the 2026-11-02 corpus: platform vendors
+# gained ~650 product pairs (``microsoft`` searches +1,721 CVEs — AMD Ryzen
+# CPUs, Adobe SDKs), and with ``MIN_SLUG_EVIDENCE`` reading as "two CVEs" every
+# single-CVE product lost its slug (16,792 pairs). The cost of row-weighting is
+# that a vendor whose CVEs NVD versions finely can dilute a legitimate minority
+# slug below this bar — ``rabbitmq-server`` fell off ``vmware`` (5 rows vs 216
+# ``broadcom``). That is the cheaper error.
 MIN_SLUG_SHARE = 0.05
 
 # ...and an absolute floor, because a share is meaningless on thin evidence: a
