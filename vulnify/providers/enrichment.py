@@ -27,6 +27,7 @@ from vulnify.providers.exploit_ingest import (
 from vulnify.providers.osv import enrich_all_osv
 from vulnify.providers.vendor_advisories import process_vendor_advisories
 from vulnify.providers.placeholder_products import refresh_placeholder_products
+from vulnify.providers.product_candidates import refresh_product_candidates
 from vulnify.providers.vendor_index import refresh_vendor_index
 from vulnify.settings import get_nvd_api_key
 
@@ -284,6 +285,7 @@ async def run_post_ingestion_enrichment(
     skip_nvd: bool = False,
     skip_vendor_index: bool = False,
     skip_placeholder_products: bool = False,
+    skip_product_candidates: bool = False,
     skip_epss: bool = False,
     skip_osv: bool = False,
     skip_nuclei: bool = False,
@@ -342,6 +344,15 @@ async def run_post_ingestion_enrichment(
     else:
         logger.info("Refreshing product/CPE-vendor index...")
         await refresh_vendor_index(store)
+
+    # After both: placeholder_products decides which CVEs are still unidentified,
+    # and the vendor index's sentinel repoint gives products the vendor name the
+    # matcher anchors on.
+    if skip_product_candidates:
+        logger.info("Product candidates: skipped (--skip-product-candidates)")
+    else:
+        logger.info("Rebuilding description-named product candidates...")
+        await refresh_product_candidates(store)
 
     if skip_epss:
         logger.info("EPSS: skipped (--skip-epss)")

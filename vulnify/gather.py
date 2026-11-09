@@ -42,6 +42,12 @@ async def main() -> None:
         "placeholder product name (leaves them unreachable by product lookup).",
     )
     parser.add_argument(
+        "--skip-product-candidates",
+        action="store_true",
+        help="Skip rebuilding product_candidate, the opt-in description-named "
+        "products for CVEs with no CNA product and no CPE (leaves it stale).",
+    )
+    parser.add_argument(
         "--skip-osv",
         action="store_true",
         help="Skip OSV enrichment (~3h after an ingest, which wipes the per-CVE "
@@ -92,6 +98,7 @@ async def main() -> None:
             skip_nvd=args.skip_nvd,
             skip_vendor_index=args.skip_vendor_index,
             skip_placeholder_products=args.skip_placeholder_products,
+            skip_product_candidates=args.skip_product_candidates,
             skip_epss=args.skip_epss,
             skip_osv=args.skip_osv,
             skip_nuclei=args.skip_nuclei,

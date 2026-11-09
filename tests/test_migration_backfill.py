@@ -143,6 +143,35 @@ class MigrationBackfillTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def test_affected_product_source_added_as_null_on_a_legacy_db(self) -> None:
+        """A pre-provenance row must read NULL, never a guessed 'cna'.
+
+        An older build's placeholder repoint is indistinguishable from a CNA
+        row, so stamping a default would claim what nobody recorded.
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute(
+            """
+            CREATE TABLE affected_product (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cve_id TEXT NOT NULL,
+                product_id INTEGER NOT NULL,
+                affected INTEGER NOT NULL DEFAULT 1,
+                notes TEXT
+            )
+            """
+        )
+        conn.executescript(self.schema_path.read_text(encoding="utf-8"))
+        conn.execute(
+            "INSERT INTO affected_product (cve_id, product_id) VALUES ('CVE-2020-0001', 1)"
+        )
+        apply_sqlite_migrations(conn)
+        apply_sqlite_migrations(conn)  # idempotent
+        self.assertEqual(
+            conn.execute("SELECT source FROM affected_product").fetchall(), [(None,)]
+        )
+        conn.close()
+
     def test_exploit_artefact_table_created_and_cascades(self) -> None:
         conn = self._bootstrap()
         cur = conn.cursor()

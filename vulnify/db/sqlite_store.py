@@ -364,7 +364,7 @@ class SqliteCveStore:
         affected_products: list[AffectedProduct] = []
         cur.execute(
             """
-            SELECT ap.id AS ap_id, ap.affected, ap.notes, ap.product_id
+            SELECT ap.id AS ap_id, ap.affected, ap.notes, ap.product_id, ap.source
             FROM affected_product ap
             WHERE ap.cve_id = ?
             ORDER BY ap.id
@@ -417,6 +417,7 @@ class SqliteCveStore:
                     versions=versions,
                     affected=sql_to_bool(ap_row["affected"]),
                     notes=ap_row["notes"] or "",
+                    source=ap_row["source"] or "",
                 )
             )
 

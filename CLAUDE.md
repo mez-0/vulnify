@@ -9,7 +9,7 @@ Deep-dive docs live in [`docs/`](docs/) — read the relevant one before working
 
 - **[docs/DATASOURCES.md](docs/DATASOURCES.md)** — the eight upstream sources, endpoints, what each contributes, licensing.
 - **[docs/PIPELINE.md](docs/PIPELINE.md)** — ingestion → enrichment flow, watermarks/resume, the cascade+heal persistence model, tri-state discipline.
-- **[docs/SCHEMA.md](docs/SCHEMA.md)** — the 21-table schema, relationships, query gotchas.
+- **[docs/SCHEMA.md](docs/SCHEMA.md)** — the 22-table schema, relationships, query gotchas.
 - **[docs/MCP.md](docs/MCP.md)** — the `vulnify-mcp` server, its 8 tools, setup, troubleshooting.
 - **[docs/EXPLORE.md](docs/EXPLORE.md)** — the Streamlit explorer.
 
@@ -56,7 +56,7 @@ uv run vulnify-gather          # build/refresh the DB (ingest + enrich)
 uv run vulnify-mcp             # start the MCP server (stdio)
 uv run vulnify-mcp </dev/null  # smoke test — starts, exits clean on EOF
 uv run streamlit run explore/app.py
-uv run pytest                  # hermetic suite (currently 138 tests, ~10s)
+uv run pytest                  # hermetic suite (currently 162 tests, ~10s)
 ```
 
 Entry points: `vulnify-gather` → `vulnify.gather:run`, `vulnify-mcp` → `vulnify.mcp:run`.
@@ -65,6 +65,7 @@ Pipeline skip flags (each = one phase, all idempotent) — see [PIPELINE.md](doc
 
 ```
 -s / --skip-ingestion   --skip-kev   --skip-nvd   --skip-placeholder-products   --skip-vendor-index
+--skip-product-candidates
 --skip-epss   --skip-osv   --skip-nuclei   --skip-exploitdb   --skip-metasploit
 ```
 
@@ -85,14 +86,16 @@ vulnify/
 │   │                    #   exploit_ingest [nuclei+edb+msf], vendor_advisories)
 │   ├── enrichment.py    # run_post_ingestion_enrichment — phase orchestrator
 │   ├── placeholder_products.py # phase — recover `n/a` product identity from CPE
+│   ├── product_candidates.py # phase — opt-in description-named products
 │   ├── vendor_index.py  # `vendor_index` phase — refresh the CPE-vendor rollup
 │   └── enrichment_resume.py
 └── db/
-    ├── schema.sql       # 21-table normalised schema + FTS5 index
+    ├── schema.sql       # 22-table normalised schema + FTS5 index
     ├── sqlite_store.py  # connection + upsert API (WAL, foreign_keys ON)
     ├── cve_upsert.py    # CVE/vendor/product write registry (delete-and-rebuild)
     ├── migrate.py       # idempotent additive migrations + FTS5 backfill
-    ├── placeholder_products.py # per-CVE CPE → (vendor, product) repoint
+    ├── placeholder_products.py # per-CVE CPE → every (vendor, product) fan-out
+    ├── product_candidates.py # `<vendor> <product>` prose matcher (guarded)
     ├── vendor_index.py  # product_cpe_vendor build + sentinel-vendor repoint
     ├── pipeline_state.py# per-phase watermark read/write
     ├── readonly.py      # read-only sqlite helper (NOTE: currently unused by mcp.py)
@@ -169,6 +172,19 @@ Get these wrong and things break *silently*:
   `n/a` product accumulates 26,354 distinct CPE slugs, so without
   `MAX_SLUGS_PER_PRODUCT` it matches *every* vendor term (a search for `aruba`
   returned 144,237 CVEs instead of 640). `MIN_SLUG_EVIDENCE` kills lone strays.
+- **Placeholder CVEs fan out to every vulnerable CPE pair — don't "tidy" it back
+  to one.** `db/placeholder_products.py` writes one `affected_product` row per
+  `(vendor, product)` the CVE's `vulnerable = 1` CPEs name, stamped
+  `source = 'cpe'`. Picking one hides the CVE from the others; resolving only
+  single-pair CVEs (the old rule) hid 40,643 from everything. Platform CPEs
+  (`vulnerable = 0`) must stay out or a third-party app lands on Microsoft.
+- **`product_candidate` is a guess and must stay out of `affected_product`.**
+  ~7% wrong vendor against CPE ground truth, and only after the
+  vendor-immediately-before-product and no-self-named-pair guards — matching a
+  bare product name is 96% wrong. Every consumer reads `affected_product` as
+  fact; a candidate is reached only by asking for it.
+- **`affected_product.source IS NULL` means unknown, not `cna`.** Rows from a
+  pre-provenance DB can be old CPE repoints. Don't backfill a default.
 - **A vendor-name merge in a migration will be silently undone.** `ensure_vendor`
   keys on exact `lower(trim(name))` and re-inserts the original spelling from the
   CVE JSON on the next gather. Vendor normalisation belongs in the write path or

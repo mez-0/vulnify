@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS affected_product (
     product_id INTEGER NOT NULL,
     affected INTEGER NOT NULL DEFAULT 1,
     notes TEXT,
+    -- Where this row's identity came from: 'cna' = the cvelistV5 record named it,
+    -- 'cpe' = the placeholder_products phase derived it from NVD's vulnerable CPE
+    -- strings because the CNA wrote a placeholder. NULL = built before the column
+    -- existed; provenance unknown, never read as either.
+    source TEXT,
     FOREIGN KEY (cve_id) REFERENCES cve (cve_id) ON DELETE CASCADE,
     FOREIGN KEY (product_id) REFERENCES product (product_id)
 );
@@ -88,6 +93,24 @@ CREATE TABLE IF NOT EXISTS product_cpe_vendor (
 );
 
 CREATE INDEX IF NOT EXISTS idx_product_cpe_vendor_slug ON product_cpe_vendor (slug);
+
+-- Derived, opt-in: a product a CVE's own description names, for CVEs nothing
+-- structured identifies (the CNA wrote a placeholder AND NVD holds no vulnerable
+-- CPE). A *candidate*, not a fact -- deliberately kept out of affected_product so
+-- no consumer inherits it without asking. Matched only where a known vendor's
+-- name is immediately followed by one of that vendor's product names; measured
+-- against CPE ground truth at ~93% vendor precision (see
+-- db/product_candidates.py). Rebuilt wholesale by the product_candidates phase.
+CREATE TABLE IF NOT EXISTS product_candidate (
+    cve_id TEXT NOT NULL,
+    product_id INTEGER NOT NULL,
+    matched_text TEXT NOT NULL,
+    PRIMARY KEY (cve_id, product_id),
+    FOREIGN KEY (cve_id) REFERENCES cve (cve_id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES product (product_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_candidate_product ON product_candidate (product_id, cve_id);
 
 CREATE TABLE IF NOT EXISTS version_range (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

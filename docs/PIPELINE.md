@@ -12,8 +12,9 @@ vulnify-gather
   └─ run_post_ingestion_enrichment
         ├─ kev          CISA Known Exploited Vulnerabilities
         ├─ nvd          NVD 2.0: CVSS, CPE, status, refs (incremental; full after an ingest)
-        ├─ placeholder_products  repoint `n/a` products onto their CPE identity (local)
+        ├─ placeholder_products  give `n/a` CVEs every product their vulnerable CPEs name (local)
         ├─ vendor_index product_cpe_vendor rollup (local; needs nvd's cpe_match)
+        ├─ product_candidates    opt-in description-named products for what's left (local)
         ├─ epss         EPSS probability + percentile (batched)
         ├─ osv          OSV package mappings (per-CVE)
         ├─ nuclei       Nuclei templates   ┐
@@ -35,8 +36,9 @@ uv run vulnify-gather --skip-nvd # re-run everything except NVD
 Skip flags (each maps to one phase; all idempotent):
 
 ```
--s / --skip-ingestion   --skip-kev    --skip-nvd    --skip-vendor-index
---skip-epss   --skip-osv    --skip-nuclei    --skip-exploitdb    --skip-metasploit
+-s / --skip-ingestion   --skip-kev    --skip-nvd    --skip-placeholder-products
+--skip-vendor-index   --skip-product-candidates   --skip-epss   --skip-osv
+--skip-nuclei    --skip-exploitdb    --skip-metasploit
 ```
 
 A full gather takes **about 5 hours** without an NVD API key. Measured on the
@@ -46,8 +48,9 @@ A full gather takes **about 5 hours** without an NVD API key. Measured on the
 |-------|-----:|
 | cvelistV5 download + ingest | ~25 min |
 | NVD bulk (full backfill, no key) | ~63 min |
-| placeholder products | ~20 s |
-| vendor index | ~1 min |
+| placeholder products | ~25 s |
+| vendor index | ~2 min |
+| product candidates | ~4 s |
 | EPSS | ~48 min |
 | **OSV** | **~2 h 45 min** |
 | Nuclei + Exploit-DB + Metasploit | ~1 min |
@@ -79,9 +82,9 @@ phase reads its own watermark and only does new work:
   Metasploit content hash); an unmoved corpus skips the parse.
 - **NVD** ignores its watermark whenever ingestion ran this gather — see
   [cascade + heal](#persistence-cascade--heal).
-- **placeholder_products** records a watermark but never resumes from it, for
-  the same reason as vendor_index below: it repoints `affected_product` rows
-  that the next ingest rebuilds onto the placeholder.
+- **placeholder_products** and **product_candidates** record a watermark but
+  never resume from it, for the same reason as vendor_index below: they write
+  from `affected_product` rows that the next ingest rebuilds onto the placeholder.
 - **vendor_index** is the exception: it records a watermark but **never resumes
   from it**. It is a local rollup of `affected_product` ⋈ `cpe_match`, both of
   which are cascade-wiped on re-ingest, and it is keyed by `product_id`. A full
@@ -129,6 +132,32 @@ evidence names, has to **merge** rather than `UPDATE`: `ensure_product` keys on
 and the next gather inserts a fresh duplicate under the placeholder — one per
 gather, indefinitely. Merging into the existing twin means the phase re-converges
 on each run instead of drifting.
+
+### Product identity: CNA, then CPE, then (opt-in) prose
+
+A CNA that writes `"product": "n/a"` leaves its CVE on one shared placeholder
+product, unreachable by any vendor or product filter. Three layers recover it,
+strongest evidence first, and each row says which one it came from:
+
+| Layer | Written to | `affected_product.source` | Coverage (2026-11-02 build) |
+|-------|-----------|---------------------------|-----------------------------|
+| cvelistV5 record names it | `affected_product` | `cna` | everything with a real product |
+| `placeholder_products` phase: every `(vendor, product)` its **vulnerable** CPEs name | `affected_product` (+ `affected` `cve_vendor` edges) | `cpe` | 40,643 CVEs, 149,838 rows |
+| `product_candidates` phase: `<vendor> <product>` named in the title/summary | `product_candidate` **only** | — | 543 of the 4,128 still unidentified |
+
+- **Fan out, never pick.** A multi-product CVE gets one row per vulnerable CPE
+  pair. The earlier rule resolved only CVEs naming exactly one pair; it avoided
+  a guess by resolving nothing and left 40,643 CVEs invisible (D-Link alone had
+  991 of its 1,874 CVEs hidden).
+- **`vulnerable = 1` only.** Platform CPEs (the Windows an app runs on, the
+  hardware beside its `_firmware`) are not what the CVE affects.
+- **Candidates never reach `affected_product`.** They are guesses (~7% wrong
+  vendor, measured against CPE); `search_cves` ignores them and `get_cve` labels
+  them. Precision table and rules: `vulnify/db/product_candidates.py`.
+- **What's left** (~3,600 CVEs, mostly 2024–2026 NVD backlog/`Deferred`) is
+  reachable only by full-text search. Use a prefix query: a product written
+  with its version glued on (`Relay3`) is one token, so `relay` misses it and
+  `relay*` finds it.
 
 The exploit write path deliberately runs **outside** `CveUpsertRegistry`:
 artefacts are enrichment derived from external corpora, not part of the

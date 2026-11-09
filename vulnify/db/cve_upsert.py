@@ -6,6 +6,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from vulnify.constants import AFFECTED_SOURCE_CNA
 from vulnify.db.sql_conversion import (
     bool_to_sql,
     bool_to_sql_nullable,
@@ -238,10 +239,18 @@ class AffectedProductsStep:
             if entry is None:
                 cur.execute(
                     """
-                    INSERT INTO affected_product (cve_id, product_id, affected, notes)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO affected_product (cve_id, product_id, affected, notes, source)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (c.cve_id, pid, bool_to_sql(ap.affected), ap.notes or ""),
+                    (
+                        c.cve_id,
+                        pid,
+                        bool_to_sql(ap.affected),
+                        ap.notes or "",
+                        # This step writes the CNA's document graph, so a row
+                        # with no recorded provenance is the CNA's.
+                        ap.source or AFFECTED_SOURCE_CNA,
+                    ),
                 )
                 ap_row_id = int(cur.lastrowid)
                 entry = (ap_row_id, set())

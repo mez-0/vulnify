@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from vulnify.constants import ExploitMaturity, Severity
+from vulnify.db.placeholder_products import resolve_placeholder_products
+from vulnify.db.product_candidates import rebuild_product_candidates
 from vulnify.db.sqlite_store import SqliteCveStore
 from vulnify.models.cve import CVE
 from vulnify.models.cvss import CVSS
@@ -583,3 +585,94 @@ class VendorFilterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlaceholderIdentityTests(unittest.TestCase):
+    """A CVE whose CNA wrote ``n/a`` must be findable once CPE names it.
+
+    Scale-shaped regression: on the 2026-11-02 build, 40,643 such CVEs named
+    several CPE products and were left on the placeholder — invisible to vendor
+    *and* product search (``search_cves(vendor="dlink")`` missed CVE-2025-60698).
+    """
+
+    def setUp(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        os.environ["VULNIFY_SCHEMA_SQL_PATH"] = str(
+            repo_root / "vulnify" / "db" / "schema.sql"
+        )
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = Path(tmp.name)
+        tmp.close()
+        self.store = SqliteCveStore(self.db_path)
+        cur = self.store.connection.cursor()
+        cur.execute("INSERT INTO vendor (name) VALUES ('')")
+        sentinel = cur.lastrowid
+        cur.execute("INSERT INTO product (name, vendor_id) VALUES ('n/a', ?)", (sentinel,))
+        placeholder = cur.lastrowid
+        for cve_id, summary in (
+            ("CVE-2025-60698", "Stack overflow in D-Link DIR-882 httpd."),
+            ("CVE-2025-0900", "Overflow in D-Link DIR-513 web handler."),
+        ):
+            cur.execute(
+                "INSERT INTO cve (cve_id, summary, published) VALUES (?, ?, '2025-10-01')",
+                (cve_id, summary),
+            )
+            cur.execute(
+                "INSERT INTO cve_vendor (cve_id, vendor_id, role) VALUES (?, ?, 'primary')",
+                (cve_id, sentinel),
+            )
+            cur.execute(
+                "INSERT INTO affected_product (cve_id, product_id, source) "
+                "VALUES (?, ?, 'cna')",
+                (cve_id, placeholder),
+            )
+        cur.executemany(
+            "INSERT INTO cpe_match (cve_id, criteria, vulnerable) VALUES (?, ?, ?)",
+            [
+                ("CVE-2025-60698", "cpe:2.3:o:dlink:dir-882_firmware:*:*:*:*:*:*:*:*", 1),
+                ("CVE-2025-60698", "cpe:2.3:a:dlink:dir-882_webui:*:*:*:*:*:*:*:*", 1),
+                ("CVE-2025-60698", "cpe:2.3:h:dlink:dir-882:-:*:*:*:*:*:*:*", 0),
+            ],
+        )
+        cur.execute("INSERT INTO vendor (name) VALUES ('D-Link')")
+        cur.execute("INSERT INTO product (name, vendor_id) VALUES ('DIR-513', ?)", (cur.lastrowid,))
+        self.store.connection.commit()
+        # The gather's order: placeholder_products → vendor_index → candidates.
+        # The vendor index is what lets "dlink" (the CPE slug) reach "D-Link".
+        resolve_placeholder_products(self.store.connection)
+        rebuild_product_cpe_vendor(self.store.connection)
+        rebuild_product_candidates(self.store.connection)
+        self.store.connection.commit()
+        mcp_module._store = self.store
+
+    def tearDown(self) -> None:
+        mcp_module._store = None
+        self.store.close()
+        self.db_path.unlink(missing_ok=True)
+
+    def _ids(self, **kw) -> set[str]:
+        return {r["cve_id"] for r in mcp_module.search_cves(limit=100, **kw)}
+
+    def test_a_multi_product_cpe_cve_is_found_by_vendor(self) -> None:
+        self.assertIn("CVE-2025-60698", self._ids(vendor="dlink"))
+
+    def test_and_by_each_of_its_products(self) -> None:
+        self.assertIn("CVE-2025-60698", self._ids(product="dir-882 firmware"))
+        self.assertIn("CVE-2025-60698", self._ids(product="webui"))
+
+    def test_get_cve_reports_provenance(self) -> None:
+        result = mcp_module.get_cve("CVE-2025-60698")
+        self.assertEqual(
+            sorted((a["product"]["name"], a["source"]) for a in result["affected_products"]),
+            [("dir-882 firmware", "cpe"), ("dir-882 webui", "cpe")],
+        )
+        self.assertEqual(result["product_candidates"], [])
+
+    def test_a_candidate_is_reported_but_never_searched(self) -> None:
+        """Opt-in: ``get_cve`` shows it, labelled; ``search_cves`` ignores it."""
+        result = mcp_module.get_cve("CVE-2025-0900")
+        self.assertEqual(
+            result["product_candidates"],
+            [{"vendor": "D-Link", "product": "DIR-513", "matched_text": "D-Link DIR-513"}],
+        )
+        self.assertNotIn("CVE-2025-0900", self._ids(product="dir-513"))

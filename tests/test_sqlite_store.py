@@ -131,6 +131,8 @@ class SqliteRoundTripTests(unittest.TestCase):
         self.assertEqual(loaded.affected_products[0].product.vendor.name, "VendorCo")
         self.assertEqual(len(loaded.affected_products[0].versions), 1)
         self.assertEqual(loaded.affected_products[0].versions[0].start_including, "2.0")
+        # The upsert writes the CNA's document graph, so its rows are 'cna'.
+        self.assertEqual(loaded.affected_products[0].source, "cna")
 
         self.assertEqual(loaded.cwes[0].cwe_id, "CWE-787")
 

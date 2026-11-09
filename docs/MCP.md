@@ -72,7 +72,11 @@ unknown-date sentinels are emitted as `null` (not `0001-01-01`).
 
 Fully hydrated CVE record: CVSS metrics, KEV listing, EPSS, exploit signals,
 references, CWEs, vendors, affected products, CPE matches — plus an `artefacts`
-list of concrete exploit evidence (same rows as `exploits_for`). `null` if the
+list of concrete exploit evidence (same rows as `exploits_for`). Each affected
+product carries a `source` (`cna` / `cpe` / `""` for a pre-provenance DB), and a
+CVE nothing structured identifies may carry `product_candidates`
+(`[{vendor, product, matched_text}]`) — unverified, description-derived, never
+used by `search_cves`. `null` if the
 CVE is unknown.
 
 ### `search_cves(...) -> list[dict]`

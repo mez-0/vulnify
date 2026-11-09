@@ -335,6 +335,11 @@ def apply_sqlite_migrations(conn: sqlite3.Connection) -> None:
     _add_column(conn, "kev", "short_description", "TEXT")
     _add_column(conn, "kev", "source", "TEXT")
 
+    # Provenance of each affected_product row ('cna' / 'cpe'). Left NULL on rows
+    # that predate it: a placeholder_products repoint from an older build is
+    # indistinguishable from a CNA row, and guessing 'cna' would be a claim.
+    _add_column(conn, "affected_product", "source", "TEXT")
+
     has_ap_unique = _index_exists(cur, "affected_product_unique")
     has_product_unique = _index_exists(cur, "product_normalized_unique")
 

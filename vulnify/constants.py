@@ -48,3 +48,12 @@ class ProductType(str, Enum):
     FIRMWARE = "FIRMWARE"
     MOBILE = "MOBILE"
     UNKNOWN = "UNKNOWN"
+
+
+#: ``affected_product.source`` values. ``NULL`` in the column (``""`` on the
+#: model) means the row predates provenance being recorded — never read as
+#: either value.
+AFFECTED_SOURCE_CNA = "cna"
+"""The cvelistV5 record named this product."""
+AFFECTED_SOURCE_CPE = "cpe"
+"""Recovered from NVD's vulnerable CPEs because the CNA wrote a placeholder."""

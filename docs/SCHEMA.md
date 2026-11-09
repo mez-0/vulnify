@@ -1,6 +1,6 @@
 # Schema
 
-21 normalised tables plus an FTS5 virtual table. Foreign keys are enabled at the
+22 normalised tables plus an FTS5 virtual table. Foreign keys are enabled at the
 application layer (`PRAGMA foreign_keys = ON`) — the top-level `cve` row is the
 parent, and **every child table cascades on delete**. That cascade is
 load-bearing for the pipeline's persistence model (see
@@ -31,7 +31,17 @@ migrations and the FTS5 backfill live in `vulnify/db/migrate.py`.
   (`assigner` / `affected` / `source` / …). PK `(cve_id, vendor_id, role)`.
 - **`product`** — products owned by a vendor; `UNIQUE (vendor_id, name, component)`.
 - **`affected_product`** — CVE ↔ product with an `affected` flag (1 = affected,
-  0 = explicitly not) and free-text `notes`.
+  0 = explicitly not), free-text `notes`, and `source`: `cna` (the CVE record
+  named the product) or `cpe` (the `placeholder_products` phase recovered it from
+  NVD's vulnerable CPEs because the CNA wrote `n/a`). `NULL` = a row from a DB
+  built before the column existed — provenance unknown, not `cna`. See
+  [PIPELINE.md](PIPELINE.md#product-identity-cna-then-cpe-then-opt-in-prose).
+- **`product_candidate`** — **derived, opt-in**: `(cve_id, product_id,
+  matched_text)` for CVEs with no CNA product *and* no vulnerable CPE, where the
+  title/summary names a known vendor immediately followed by one of its
+  products. **Unverified** (~7% wrong vendor against CPE ground truth) and
+  deliberately kept out of `affected_product`, so no product join picks it up
+  by accident. Rebuilt wholesale by the `product_candidates` phase.
 - **`version_range`** — per-`affected_product` version constraints:
   `start_including` / `start_excluding` / `end_including` / `end_excluding`,
   `fixed_version`, and the original `raw_text`.

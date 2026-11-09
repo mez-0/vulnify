@@ -38,8 +38,12 @@ class _Base(unittest.TestCase):
         self.conn.close()
         os.unlink(self.tmp.name)
 
-    def seed(self, cve_id, product_name, vendor_name, cpes):
-        """One CVE on a product, with its CPE evidence."""
+    def seed(self, cve_id, product_name, vendor_name, cpes, platform_cpes=()):
+        """One CVE on a product, with its CPE evidence.
+
+        ``platform_cpes`` are written ``vulnerable = 0`` — the OS or hardware an
+        NVD configuration names *beside* the vulnerable component.
+        """
         self.cur.execute(
             "INSERT OR IGNORE INTO vendor (name) VALUES (?)", (vendor_name,))
         self.cur.execute(
@@ -60,6 +64,10 @@ class _Base(unittest.TestCase):
         for c in cpes:
             self.cur.execute(
                 "INSERT INTO cpe_match (cve_id, criteria) VALUES (?, ?)", (cve_id, c))
+        for c in platform_cpes:
+            self.cur.execute(
+                "INSERT INTO cpe_match (cve_id, criteria, vulnerable) VALUES (?, ?, 0)",
+                (cve_id, c))
         self.conn.commit()
         return pid
 
@@ -69,6 +77,20 @@ class _Base(unittest.TestCase):
             "JOIN product p ON p.product_id = ap.product_id "
             "JOIN vendor v ON v.vendor_id = p.vendor_id WHERE ap.cve_id = ?",
             (cve_id,))
+        return self.cur.fetchall()
+
+    def sources_of(self, cve_id):
+        self.cur.execute(
+            "SELECT p.name, ap.source FROM affected_product ap "
+            "JOIN product p ON p.product_id = ap.product_id WHERE ap.cve_id = ? "
+            "ORDER BY p.name", (cve_id,))
+        return self.cur.fetchall()
+
+    def vendor_edges(self, cve_id):
+        self.cur.execute(
+            "SELECT v.name, cv.role FROM cve_vendor cv "
+            "JOIN vendor v ON v.vendor_id = cv.vendor_id WHERE cv.cve_id = ? "
+            "ORDER BY v.name, cv.role", (cve_id,))
         return self.cur.fetchall()
 
 
@@ -89,19 +111,98 @@ class TestResolution(_Base):
         self.assertEqual(self.product_of("CVE-2024-0002"),
                          [("RealProduct", "RealVendor")])
 
-    def test_ambiguous_cpes_are_left_on_the_placeholder(self):
-        """A multi-product advisory must not be attached to one of them.
+    def test_a_multi_product_cve_gets_every_product(self):
+        """🚨 Fan out, never pick one.
 
         Picking the most frequent slug would hide the CVE from a search for
-        every other product it affects.
+        every other product it affects. Leaving it on the placeholder (the old
+        rule) hid it from all of them: 40,643 CVEs on the 2026-11-02 build.
         """
         self.seed("CVE-2024-0003", "n/a", "", [
             "cpe:2.3:a:examplecorp:appone:*:*:*:*:*:*:*:*",
+            "cpe:2.3:a:othercorp:apptwo:*:*:*:*:*:*:*:*",
+        ])
+        written, cves = resolve_placeholder_products(self.conn)
+        self.assertEqual((written, cves), (2, 1))
+        self.assertEqual(sorted(self.product_of("CVE-2024-0003")),
+                         [("appone", "examplecorp"), ("apptwo", "othercorp")])
+
+    def test_platform_cpes_are_not_fanned_out(self):
+        """``vulnerable = 0`` is what the app runs on, not what is vulnerable."""
+        self.seed("CVE-2024-0010", "n/a", "",
+                  ["cpe:2.3:a:examplecorp:exampleapp:*:*:*:*:*:*:*:*"],
+                  platform_cpes=["cpe:2.3:o:microsoft:windows:-:*:*:*:*:*:*:*"])
+        resolve_placeholder_products(self.conn)
+        self.assertEqual(self.product_of("CVE-2024-0010"),
+                         [("exampleapp", "examplecorp")])
+        self.assertNotIn("microsoft", [v for v, _ in self.vendor_edges("CVE-2024-0010")])
+
+    def test_a_cve_with_only_platform_cpes_stays_on_the_placeholder(self):
+        self.seed("CVE-2024-0011", "n/a", "", [],
+                  platform_cpes=["cpe:2.3:h:examplecorp:router:-:*:*:*:*:*:*:*"])
+        self.assertEqual(resolve_placeholder_products(self.conn), (0, 0))
+        self.assertEqual(self.product_of("CVE-2024-0011"), [("n/a", "")])
+
+    def test_every_row_it_writes_is_marked_cpe(self):
+        self.seed("CVE-2024-0012", "n/a", "", [
+            "cpe:2.3:o:examplecorp:router_firmware:*:*:*:*:*:*:*:*",
+            "cpe:2.3:a:examplecorp:webui:*:*:*:*:*:*:*:*",
+        ])
+        resolve_placeholder_products(self.conn)
+        self.assertEqual(self.sources_of("CVE-2024-0012"),
+                         [("router firmware", "cpe"), ("webui", "cpe")])
+
+    def test_each_resolved_vendor_gets_an_affected_edge(self):
+        """A ``cve_vendor`` reader must see what a product join sees."""
+        self.cur.execute("INSERT INTO vendor (name) VALUES ('')")
+        self.seed("CVE-2024-0013", "n/a", "", [
+            "cpe:2.3:a:examplecorp:appone:*:*:*:*:*:*:*:*",
+            "cpe:2.3:a:othercorp:apptwo:*:*:*:*:*:*:*:*",
+        ])
+        self.cur.execute(
+            "INSERT INTO cve_vendor (cve_id, vendor_id, role) "
+            "SELECT 'CVE-2024-0013', vendor_id, 'primary' FROM vendor WHERE name = ''")
+        resolve_placeholder_products(self.conn)
+        resolve_placeholder_products(self.conn)  # no duplicate edges on a rerun
+        self.assertEqual(self.vendor_edges("CVE-2024-0013"), [
+            ("", "primary"), ("examplecorp", "affected"), ("othercorp", "affected")])
+
+    def test_the_anchor_keeps_its_version_ranges(self):
+        self.seed("CVE-2024-0014", "n/a", "", [
+            "cpe:2.3:a:examplecorp:appone:*:*:*:*:*:*:*:*",
             "cpe:2.3:a:examplecorp:apptwo:*:*:*:*:*:*:*:*",
         ])
-        moved, _ = resolve_placeholder_products(self.conn)
-        self.assertEqual(moved, 0)
-        self.assertEqual(self.product_of("CVE-2024-0003"), [("n/a", "")])
+        self.cur.execute(
+            "INSERT INTO version_range (affected_product_id, raw_text) "
+            "SELECT id, '< 2.0' FROM affected_product WHERE cve_id = 'CVE-2024-0014'")
+        resolve_placeholder_products(self.conn)
+        self.cur.execute(
+            "SELECT p.name FROM version_range vr "
+            "JOIN affected_product ap ON ap.id = vr.affected_product_id "
+            "JOIN product p ON p.product_id = ap.product_id WHERE ap.cve_id = ?",
+            ("CVE-2024-0014",))
+        self.assertEqual(self.cur.fetchall(), [("appone",)])
+
+    def test_the_anchor_moves_to_a_target_the_cve_does_not_already_hold(self):
+        """The first target is taken, so the anchor and its ranges go to the next."""
+        self.seed("CVE-2024-0015", "appone", "examplecorp", [])
+        self.seed("CVE-2024-0015", "n/a", "", [
+            "cpe:2.3:a:examplecorp:appone:*:*:*:*:*:*:*:*",
+            "cpe:2.3:a:examplecorp:apptwo:*:*:*:*:*:*:*:*",
+        ])
+        written, _ = resolve_placeholder_products(self.conn)
+        self.assertEqual(written, 1)
+        self.assertEqual(sorted(self.product_of("CVE-2024-0015")),
+                         [("appone", "examplecorp"), ("apptwo", "examplecorp")])
+
+    def test_fanout_is_idempotent(self):
+        self.seed("CVE-2024-0016", "n/a", "", [
+            "cpe:2.3:a:examplecorp:appone:*:*:*:*:*:*:*:*",
+            "cpe:2.3:a:examplecorp:apptwo:*:*:*:*:*:*:*:*",
+        ])
+        self.assertEqual(resolve_placeholder_products(self.conn), (2, 1))
+        self.assertEqual(resolve_placeholder_products(self.conn), (0, 0))
+        self.assertEqual(len(self.product_of("CVE-2024-0016")), 2)
 
     def test_degenerate_cpes_resolve_nothing(self):
         self.seed("CVE-2024-0004", "n/a", "",

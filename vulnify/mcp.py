@@ -220,6 +220,31 @@ def _exploit_artefacts(store: SqliteCveStore, cve_id: str) -> list[dict[str, Any
     return [{col: row[col] for col in _ARTEFACT_COLUMNS} for row in cur.fetchall()]
 
 
+def _product_candidates(store: SqliteCveStore, cve_id: str) -> list[dict[str, Any]]:
+    """Description-named product candidates for a CVE (see ``db/product_candidates``).
+
+    Empty for any CVE with a CNA-named or CPE-derived product — candidates are
+    only computed for CVEs nothing structured identifies — and on a DB built
+    before the table existed.
+    """
+    cur = store.connection.cursor()
+    cur.execute(
+        """
+        SELECT v.name AS vendor, p.name AS product, pc.matched_text
+        FROM product_candidate pc
+        JOIN product p ON p.product_id = pc.product_id
+        JOIN vendor v ON v.vendor_id = p.vendor_id
+        WHERE pc.cve_id = ?
+        ORDER BY v.name, p.name
+        """,
+        (cve_id,),
+    )
+    return [
+        {"vendor": r["vendor"], "product": r["product"], "matched_text": r["matched_text"]}
+        for r in cur.fetchall()
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -245,6 +270,15 @@ def get_cve(cve_id: str) -> dict[str, Any] | None:
     (source, url, confidence) behind each signal. ``exploit.in_the_wild`` and
     ``exploit.ransomware_usage`` come from NVD / CISA KEV.
 
+    Note on product identity: each ``affected_products`` entry carries a
+    ``source`` — ``"cna"`` (the CVE record named it) or ``"cpe"`` (recovered
+    from NVD's vulnerable CPEs because the CNA wrote ``n/a``); ``""`` on rows
+    from a DB that predates the field. A CVE with neither may carry
+    ``product_candidates``: products its description names as
+    ``<vendor> <product>``. Those are **unverified guesses** (~7% wrong vendor
+    when measured against CPE) and are never used by ``search_cves`` — confirm
+    against the references before relying on one.
+
     :param cve_id: Canonical CVE id, e.g. ``"CVE-2024-3094"``.
     """
     store = _get_store()
@@ -254,6 +288,7 @@ def get_cve(cve_id: str) -> dict[str, Any] | None:
         return None
     result = _to_jsonable(cve)
     result["artefacts"] = _exploit_artefacts(store, cid)
+    result["product_candidates"] = _product_candidates(store, cid)
     return result
 
 

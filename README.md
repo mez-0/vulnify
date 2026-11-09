@@ -39,7 +39,7 @@ Deeper references live in [`docs/`](docs/):
 
 - **[Data sources](docs/DATASOURCES.md)** — every upstream feed, endpoint, and licence.
 - **[Pipeline](docs/PIPELINE.md)** — ingestion → enrichment, watermarks/resume, the cascade+heal model, tri-state discipline.
-- **[Schema](docs/SCHEMA.md)** — the 21-table layout and query gotchas.
+- **[Schema](docs/SCHEMA.md)** — the 22-table layout and query gotchas.
 - **[MCP server](docs/MCP.md)** — the 8 tools, per-agent setup, troubleshooting.
 - **[Explorer](docs/EXPLORE.md)** — the Streamlit dashboard, tab by tab.
 
@@ -199,7 +199,7 @@ vulnify/
 │   │   ├── enrichment.py     # phase orchestrator
 │   │   └── enrichment_resume.py
 │   └── db/
-│       ├── schema.sql        # 21-table normalised schema + FTS5 index
+│       ├── schema.sql        # 22-table normalised schema + FTS5 index
 │       ├── sqlite_store.py   # connection + upsert API
 │       ├── readonly.py       # shared read-only sqlite3 helper
 │       ├── cve_upsert.py     # CVE/vendor/product writes

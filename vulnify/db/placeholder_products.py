@@ -47,6 +47,8 @@ from collections import defaultdict
 
 from loguru import logger
 
+from vulnify.constants import AFFECTED_SOURCE_CPE
+
 #: Product strings a CNA writes when it declines to name one. Matched
 #: case-insensitively after stripping. Mirrors ``_truthy_vendor``'s set in
 #: ``providers/cveproject.py`` — the asymmetry between the two is the bug this
@@ -59,15 +61,20 @@ PLACEHOLDER_PRODUCT_NAMES: frozenset[str] = frozenset({
 #: wildcard and NA markers; the rest are placeholders by another name.
 _DEGENERATE_SLUGS: frozenset[str] = frozenset({"", "*", "-", "n/a", "n\\a", "other"})
 
-#: A CVE must name exactly one product slug for it to be repointed.
+#: 🚨 **Every vulnerable pair, never the most frequent one.** A CVE whose CPEs
+#: name several products is usually a multi-product advisory. Picking one slug
+#: would attach the whole CVE to it and hide it from searches for the others;
+#: that is the guess this module refuses to make. The earlier rule — resolve
+#: only CVEs naming *exactly one* pair — avoided the guess by resolving nothing,
+#: which left 40,643 CVEs (2026-11-02 build) unreachable by vendor *and*
+#: product. Writing one ``affected_product`` row per pair hides nothing and
+#: claims only what NVD's configuration states.
 #:
-#: 🚨 **Under-claim rather than guess.** A CVE listing several products is
-#: usually a multi-product advisory, and picking the most frequent slug would
-#: attach the whole CVE to one of them and hide it from searches for the others.
-#: Leaving it on the placeholder keeps it *equally* unreachable, which is worse
-#: for nobody and wrong for no one. Same discipline as the exploit tri-state:
-#: the failure mode of an adjudicator must be "I do not know".
-_MAX_DISTINCT_PRODUCTS = 1
+#: ⚠️ **Only ``vulnerable = 1`` rows.** NVD configurations carry platform CPEs
+#: with ``vulnerable = false`` — the Windows an application runs on, the
+#: hardware model beside its ``_firmware``. Fanning those out would attach a
+#: third-party app CVE to Microsoft. 594k of the 3.2M ``cpe_match`` rows are
+#: non-vulnerable.
 
 
 #: A CPE 2.3 component separator: a colon not escaped by a backslash.
@@ -117,7 +124,7 @@ def _norm_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
-def _placeholder_product_ids(cur: sqlite3.Cursor) -> list[int]:
+def placeholder_product_ids(cur: sqlite3.Cursor) -> list[int]:
     """Product rows whose name is a CNA placeholder.
 
     Usually one shared row, but the query does not assume that: a real vendor
@@ -201,17 +208,24 @@ class _IdentityResolver:
 
 
 def resolve_placeholder_products(conn: sqlite3.Connection) -> tuple[int, int]:
-    """Repoint placeholder-product rows onto identities derived from CPE.
+    """Give placeholder-product CVEs every identity their vulnerable CPEs name.
 
-    Idempotent: a second run finds no placeholder-owned rows left to move for
-    the CVEs it already resolved, and re-derives the same identity for any it
-    could not.
+    For each CVE still anchored on a placeholder product: the anchor row is
+    repointed onto the first ``(vendor, product)`` pair (keeping its
+    ``version_range`` rows), a further ``affected_product`` row is written for
+    each remaining pair, every row this writes is stamped
+    ``source = 'cpe'``, and each pair's vendor gets the ``affected``
+    ``cve_vendor`` edge the cvelistV5 upsert would have written had the CNA
+    named it.
+
+    Idempotent: a second run finds no placeholder anchor left for the CVEs it
+    resolved, and re-derives the same rows for any whose anchor could not move.
 
     :param conn: Open connection to the corpus.
-    :returns: ``(rows_repointed, cves_resolved)``.
+    :returns: ``(rows_written, cves_resolved)`` — repointed anchors plus new rows.
     """
     cur = conn.cursor()
-    placeholders = _placeholder_product_ids(cur)
+    placeholders = placeholder_product_ids(cur)
     if not placeholders:
         logger.info("placeholder products: none present")
         return 0, 0
@@ -223,50 +237,112 @@ def resolve_placeholder_products(conn: sqlite3.Connection) -> tuple[int, int]:
         FROM affected_product ap
         JOIN cpe_match cm ON cm.cve_id = ap.cve_id
         WHERE ap.product_id IN ({marks})
+          AND cm.vulnerable = 1
           AND cm.criteria LIKE 'cpe:2.3:_:%'
         """,
         placeholders,
     )
 
-    # cve_id -> the distinct (vendor, product) pairs its CPEs name.
+    # cve_id -> the distinct (vendor, product) pairs its vulnerable CPEs name.
     per_cve: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for cve_id, criteria in cur.fetchall():
         if (pair := _parse_cpe(criteria)) is not None:
             per_cve[cve_id].add(pair)
-
-    resolved = {
-        cve_id: next(iter(pairs))
-        for cve_id, pairs in per_cve.items()
-        if len(pairs) == _MAX_DISTINCT_PRODUCTS
-    }
-    if not resolved:
-        logger.info("placeholder products: nothing unambiguous to resolve")
+    if not per_cve:
+        logger.info("placeholder products: no CPE evidence to resolve from")
         return 0, 0
 
     identities = _IdentityResolver(cur)
-    moved = 0
-    for cve_id, (vendor, product) in resolved.items():
-        target = identities.product_id(vendor, product)
-        # 🚨 ``OR IGNORE``: ``affected_product_unique`` is (cve_id, product_id),
-        # and a CVE may already carry a real row on the resolved product. A
-        # plain UPDATE raises there and aborts the gather; the CVE is already
-        # reachable through that row, so leaving the placeholder row is free.
-        cur.execute(
-            f"UPDATE OR IGNORE affected_product SET product_id = ? "
-            f"WHERE cve_id = ? AND product_id IN ({marks})",
-            (target, cve_id, *placeholders),
-        )
-        moved += cur.rowcount
+    repointed = inserted = 0
+    for cve_id, pairs in per_cve.items():
+        # Sorted so the anchor's destination is stable across gathers.
+        targets = list(dict.fromkeys(identities.product_id(v, p) for v, p in sorted(pairs)))
+        repointed += _repoint_anchor(cur, cve_id, targets, placeholders)
+        inserted += _write_fanout(cur, cve_id, targets)
+        _write_vendor_edges(cur, cve_id, targets)
 
     logger.info(
-        "placeholder products: repointed {} rows across {} CVEs onto {} identities "
-        "({} left ambiguous)",
-        moved, len(resolved), identities.created_count(), len(per_cve) - len(resolved),
+        "placeholder products: {} CVEs resolved — {} anchors repointed, {} rows "
+        "added, {} distinct identities",
+        len(per_cve), repointed, inserted, identities.created_count(),
     )
-    return moved, len(resolved)
+    return repointed + inserted, len(per_cve)
+
+
+def _repoint_anchor(
+    cur: sqlite3.Cursor, cve_id: str, targets: list[int], placeholders: list[int]
+) -> int:
+    """Move the placeholder row onto the first target the CVE does not already hold.
+
+    🚨 ``affected_product_unique`` is ``(cve_id, product_id)``, and a CVE may
+    already carry a real row on a resolved product; repointing onto that one
+    raises and aborts the gather. Trying the targets in turn keeps the anchor's
+    ``version_range`` rows on a real product whenever any target is free; when
+    none is, the anchor stays and the CVE is reachable through the others.
+    """
+    marks = ",".join("?" * len(placeholders))
+    for target in targets:
+        if _holds(cur, cve_id, target):
+            continue
+        cur.execute(
+            f"UPDATE affected_product SET product_id = ?, source = ? "
+            f"WHERE id = (SELECT id FROM affected_product "
+            f"            WHERE cve_id = ? AND product_id IN ({marks}) ORDER BY id LIMIT 1)",
+            (target, AFFECTED_SOURCE_CPE, cve_id, *placeholders),
+        )
+        return cur.rowcount
+    return 0
+
+
+def _write_fanout(cur: sqlite3.Cursor, cve_id: str, targets: list[int]) -> int:
+    """One ``affected_product`` row per target the CVE does not already hold.
+
+    Existence-checked rather than ``INSERT OR IGNORE``: ``schema.sql`` does not
+    declare ``affected_product_unique`` (the migration adds it), so on a fresh
+    bootstrap there is no constraint for ``OR IGNORE`` to lean on.
+    """
+    written = 0
+    for target in targets:
+        if _holds(cur, cve_id, target):
+            continue
+        cur.execute(
+            "INSERT INTO affected_product (cve_id, product_id, affected, notes, source) "
+            "VALUES (?, ?, 1, '', ?)",
+            (cve_id, target, AFFECTED_SOURCE_CPE),
+        )
+        written += 1
+    return written
+
+
+def _write_vendor_edges(cur: sqlite3.Cursor, cve_id: str, targets: list[int]) -> None:
+    """The ``affected`` vendor edge for each target's owning vendor.
+
+    Mirrors ``AffectedVendorEdgesStep`` in the cvelistV5 upsert, so a consumer
+    reading vendors through ``cve_vendor`` sees the same CVE a product join does.
+    """
+    marks = ",".join("?" * len(targets))
+    cur.execute(
+        f"""
+        INSERT OR IGNORE INTO cve_vendor (cve_id, vendor_id, role)
+        SELECT DISTINCT ?, p.vendor_id, 'affected' FROM product p
+        WHERE p.product_id IN ({marks})
+          AND p.vendor_id NOT IN (SELECT vendor_id FROM cve_vendor
+                                  WHERE cve_id = ? AND role = 'primary')
+        """,
+        (cve_id, *targets, cve_id),
+    )
+
+
+def _holds(cur: sqlite3.Cursor, cve_id: str, product_id: int) -> bool:
+    cur.execute(
+        "SELECT 1 FROM affected_product WHERE cve_id = ? AND product_id = ? LIMIT 1",
+        (cve_id, product_id),
+    )
+    return cur.fetchone() is not None
 
 
 __all__ = [
     "PLACEHOLDER_PRODUCT_NAMES",
+    "placeholder_product_ids",
     "resolve_placeholder_products",
 ]

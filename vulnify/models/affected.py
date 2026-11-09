@@ -31,3 +31,10 @@ class AffectedProduct:
     Notes model represents a note that is affected by a vulnerability.
     """
     notes: str = field(default_factory=str)
+
+    """
+    Where the identity came from: ``"cna"`` (the cvelistV5 record named it),
+    ``"cpe"`` (recovered from NVD's vulnerable CPEs because the CNA wrote a
+    placeholder), or ``""`` when the row predates provenance being recorded.
+    """
+    source: str = field(default_factory=str)
