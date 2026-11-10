@@ -74,7 +74,9 @@ _DEGENERATE_SLUGS: frozenset[str] = frozenset({"", "*", "-", "n/a", "n\\a", "oth
 #: with ``vulnerable = false`` — the Windows an application runs on, the
 #: hardware model beside its ``_firmware``. Fanning those out would attach a
 #: third-party app CVE to Microsoft. 594k of the 3.2M ``cpe_match`` rows are
-#: non-vulnerable.
+#: non-vulnerable. One exception, for NVD's legacy records: a CVE with *no*
+#: vulnerable CPE and exactly one platform pair resolves to it — see
+#: ``_pairs_to_resolve``.
 
 
 #: A CPE 2.3 component separator: a colon not escaped by a backslash.
@@ -233,21 +235,23 @@ def resolve_placeholder_products(conn: sqlite3.Connection) -> tuple[int, int]:
     marks = ",".join("?" * len(placeholders))
     cur.execute(
         f"""
-        SELECT ap.cve_id, cm.criteria
+        SELECT ap.cve_id, cm.vulnerable, cm.criteria
         FROM affected_product ap
         JOIN cpe_match cm ON cm.cve_id = ap.cve_id
         WHERE ap.product_id IN ({marks})
-          AND cm.vulnerable = 1
           AND cm.criteria LIKE 'cpe:2.3:_:%'
         """,
         placeholders,
     )
 
-    # cve_id -> the distinct (vendor, product) pairs its vulnerable CPEs name.
-    per_cve: dict[str, set[tuple[str, str]]] = defaultdict(set)
-    for cve_id, criteria in cur.fetchall():
+    # cve_id -> the distinct (vendor, product) pairs its CPEs name, split by
+    # NVD's vulnerable flag.
+    vulnerable: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    platform: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for cve_id, is_vulnerable, criteria in cur.fetchall():
         if (pair := _parse_cpe(criteria)) is not None:
-            per_cve[cve_id].add(pair)
+            (vulnerable if is_vulnerable else platform)[cve_id].add(pair)
+    per_cve = _pairs_to_resolve(vulnerable, platform)
     if not per_cve:
         logger.info("placeholder products: no CPE evidence to resolve from")
         return 0, 0
@@ -267,6 +271,32 @@ def resolve_placeholder_products(conn: sqlite3.Connection) -> tuple[int, int]:
         len(per_cve), repointed, inserted, identities.created_count(),
     )
     return repointed + inserted, len(per_cve)
+
+
+def _pairs_to_resolve(
+    vulnerable: dict[str, set[tuple[str, str]]],
+    platform: dict[str, set[tuple[str, str]]],
+) -> dict[str, set[tuple[str, str]]]:
+    """Which pairs each CVE resolves to: its vulnerable ones, else a lone platform one.
+
+    ⚠️ **The fallback is for NVD's legacy records, not a loosening.** 394
+    placeholder CVEs (2026-11-10 build), almost all 2003–2005, carry *only*
+    ``vulnerable = 0`` CPEs: NVD's old configurations flagged the affected
+    product itself that way (CVE-2003-1305 is Internet Explorer, flagged
+    non-vulnerable). Where that CVE names exactly one pair it is the product —
+    12 of 12 sampled were — and the single-pair rule that predates fan-out
+    resolved them, so dropping them regressed 357 CVEs. It is not perfect:
+    CVE-2008-5529 is CA eTrust, and its one platform pair is the Internet
+    Explorer it runs beside, so it lands on IE — the same answer the shipped
+    rule gave. Several platform pairs stay unresolved (that is the
+    app-plus-the-OS-it-runs-on shape), and platform pairs are never mixed in
+    when a CVE has any vulnerable ones.
+    """
+    resolved = {cve_id: pairs for cve_id, pairs in vulnerable.items() if pairs}
+    for cve_id, pairs in platform.items():
+        if cve_id not in resolved and len(pairs) == 1:
+            resolved[cve_id] = pairs
+    return resolved
 
 
 def _repoint_anchor(

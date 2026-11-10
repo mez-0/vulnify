@@ -137,9 +137,25 @@ class TestResolution(_Base):
                          [("exampleapp", "examplecorp")])
         self.assertNotIn("microsoft", [v for v, _ in self.vendor_edges("CVE-2024-0010")])
 
-    def test_a_cve_with_only_platform_cpes_stays_on_the_placeholder(self):
-        self.seed("CVE-2024-0011", "n/a", "", [],
-                  platform_cpes=["cpe:2.3:h:examplecorp:router:-:*:*:*:*:*:*:*"])
+    def test_a_lone_platform_pair_resolves_when_nothing_is_vulnerable(self):
+        """NVD's 2003–2005 records flag the affected product itself ``vulnerable = 0``.
+
+        357 such CVEs (CVE-2003-1305 is Internet Explorer) were resolved by the
+        single-pair rule and regressed when fan-out went vulnerable-only.
+        """
+        self.seed("CVE-2003-0011", "n/a", "", [], platform_cpes=[
+            "cpe:2.3:a:examplecorp:legacyapp:6:*:*:*:*:*:*:*",
+            "cpe:2.3:a:examplecorp:legacyapp:7:*:*:*:*:*:*:*",
+        ])
+        self.assertEqual(resolve_placeholder_products(self.conn), (1, 1))
+        self.assertEqual(self.sources_of("CVE-2003-0011"), [("legacyapp", "cpe")])
+
+    def test_several_platform_pairs_stay_on_the_placeholder(self):
+        """App-plus-the-OS-it-runs-on, with nothing flagged vulnerable: no guess."""
+        self.seed("CVE-2024-0011", "n/a", "", [], platform_cpes=[
+            "cpe:2.3:a:examplecorp:exampleapp:-:*:*:*:*:*:*:*",
+            "cpe:2.3:o:microsoft:windows:-:*:*:*:*:*:*:*",
+        ])
         self.assertEqual(resolve_placeholder_products(self.conn), (0, 0))
         self.assertEqual(self.product_of("CVE-2024-0011"), [("n/a", "")])
 
