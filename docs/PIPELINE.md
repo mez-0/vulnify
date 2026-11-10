@@ -41,19 +41,23 @@ Skip flags (each maps to one phase; all idempotent):
 --skip-nuclei    --skip-exploitdb    --skip-metasploit
 ```
 
-A full gather takes **about 5 hours** without an NVD API key. Measured on the
-2026-11-02 build (417,700 CVEs), with ingestion running:
+A full gather takes **4–5 hours** without an NVD API key. Measured on two
+builds with ingestion running (the product-identity phases on the first are
+from a trial run against a copy of it):
 
-| Phase | Time |
-|-------|-----:|
-| cvelistV5 download + ingest | ~25 min |
-| NVD bulk (full backfill, no key) | ~63 min |
-| placeholder products | ~25 s |
-| vendor index | ~2 min |
-| product candidates | ~4 s |
-| EPSS | ~48 min |
-| **OSV** | **~2 h 45 min** |
-| Nuclei + Exploit-DB + Metasploit | ~1 min |
+| Phase | 2026-11-02 build | 2026-11-10 build |
+|-------|-----:|-----:|
+| cvelistV5 download + ingest | ~25 min | 24 min |
+| NVD bulk (full backfill, no key) | ~63 min | 31 min |
+| placeholder products | ~25 s | 22 s |
+| vendor index | ~2 min | 1.6 min |
+| product candidates | ~4 s | 3 s |
+| EPSS | ~48 min | 42 min |
+| **OSV** | **~2 h 45 min** | **2 h 34 min** |
+| Nuclei + Exploit-DB + Metasploit | ~1 min | ~1 min |
+| **Total** | **~5 h** | **4 h 15 min** |
+
+NVD halving between two keyless runs is NVD's response time, not a code change.
 
 OSV is the long pole after an ingest, not NVD: the ingest cascade-wipes every
 `osv_checked` marker, so all CVEs are re-queried. A gather without ingestion is
@@ -139,22 +143,22 @@ A CNA that writes `"product": "n/a"` leaves its CVE on one shared placeholder
 product, unreachable by any vendor or product filter. Three layers recover it,
 strongest evidence first, and each row says which one it came from:
 
-| Layer | Written to | `affected_product.source` | Coverage (2026-11-02 build) |
+| Layer | Written to | `affected_product.source` | Coverage (2026-11-10 build) |
 |-------|-----------|---------------------------|-----------------------------|
-| cvelistV5 record names it | `affected_product` | `cna` | everything with a real product |
-| `placeholder_products` phase: every `(vendor, product)` its **vulnerable** CPEs name | `affected_product` (+ `affected` `cve_vendor` edges) | `cpe` | 40,643 CVEs, 149,838 rows |
-| `product_candidates` phase: `<vendor> <product>` named in the title/summary | `product_candidate` **only** | — | 543 of the 4,128 still unidentified |
+| cvelistV5 record names it | `affected_product` | `cna` | 475,242 rows |
+| `placeholder_products` phase: every `(vendor, product)` its **vulnerable** CPEs name | `affected_product` (+ `affected` `cve_vendor` edges) | `cpe` | 140,040 CVEs, 249,236 rows (the old one-pair rule reached ~99,800) |
+| `product_candidates` phase: `<vendor> <product>` named in the title/summary | `product_candidate` **only** | — | 658 of the 4,486 still unidentified (833 rows) |
 
 - **Fan out, never pick.** A multi-product CVE gets one row per vulnerable CPE
   pair. The earlier rule resolved only CVEs naming exactly one pair; it avoided
   a guess by resolving nothing and left 40,643 CVEs invisible (D-Link alone had
-  991 of its 1,874 CVEs hidden).
+  989 of its 1,872 CVEs hidden).
 - **`vulnerable = 1` only.** Platform CPEs (the Windows an app runs on, the
   hardware beside its `_firmware`) are not what the CVE affects.
 - **Candidates never reach `affected_product`.** They are guesses (~7% wrong
   vendor, measured against CPE); `search_cves` ignores them and `get_cve` labels
   them. Precision table and rules: `vulnify/db/product_candidates.py`.
-- **What's left** (~3,600 CVEs, mostly 2024–2026 NVD backlog/`Deferred`) is
+- **What's left** (~3,800 CVEs, mostly 2024–2026 NVD backlog/`Deferred`) is
   reachable only by full-text search. Use a prefix query: a product written
   with its version glued on (`Relay3`) is one token, so `relay` misses it and
   `relay*` finds it.
