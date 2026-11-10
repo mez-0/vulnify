@@ -53,7 +53,9 @@ class VendorIndexTestCase(unittest.TestCase):
         )
         return int(cur.lastrowid)
 
-    def _cve(self, cve_id: str, product_id: int, cpes: list[str]) -> None:
+    def _cve(
+        self, cve_id: str, product_id: int, cpes: list[str], source: str | None = None
+    ) -> None:
         self.conn.execute(
             "INSERT INTO cve (cve_id, title, summary, published, modified) "
             "VALUES (?, '', '', '2020-01-01T00:00:00+00:00', "
@@ -61,8 +63,9 @@ class VendorIndexTestCase(unittest.TestCase):
             (cve_id,),
         )
         self.conn.execute(
-            "INSERT INTO affected_product (cve_id, product_id, affected) VALUES (?, ?, 1)",
-            (cve_id, product_id),
+            "INSERT INTO affected_product (cve_id, product_id, affected, source) "
+            "VALUES (?, ?, 1, ?)",
+            (cve_id, product_id, source),
         )
         for criteria in cpes:
             self.conn.execute(
@@ -305,6 +308,49 @@ class EvidenceWeightingTests(VendorIndexTestCase):
             )
         }
         self.assertEqual(slugs, {"amd"})
+
+
+class FanOutEvidenceTests(VendorIndexTestCase):
+    """A CPE-resolved row teaches the index its own vendor's slug, nothing else.
+
+    Shape from the 2026-11-10 build: fan-out attached PAN-OS to multi-vendor
+    advisories, every other vendor's CPEs were counted as PAN-OS evidence, the
+    product passed ``MAX_SLUGS_PER_PRODUCT`` and left the index whole, and a
+    search for ``paloaltonetworks`` lost 127 of its 410 CVEs.
+    """
+
+    def _slugs(self, product_id: int) -> set[str]:
+        return {
+            r[0]
+            for r in self.conn.execute(
+                "SELECT slug FROM product_cpe_vendor WHERE product_id = ?", (product_id,)
+            )
+        }
+
+    def test_a_fanned_out_row_counts_only_its_own_vendors_cpes(self) -> None:
+        pan_os = self._product("PAN-OS", self._vendor("Palo Alto Networks"))
+        for i in range(12):
+            own = [self._cpe("paloaltonetworks", "pan-os", f"9.{v}") for v in range(3)]
+            other = [self._cpe(f"othervendor{i}", "thing", f"1.{v}") for v in range(3)]
+            self._cve(f"CVE-2026-{7000 + i}", pan_os, own + other, source="cpe")
+
+        rebuild_product_cpe_vendor(self.conn)
+        self.assertEqual(self._slugs(pan_os), {"paloaltonetworks"})
+
+    def test_a_cna_row_still_counts_every_cpe_on_its_cve(self) -> None:
+        """The CVE is *about* a CNA-named product, so a respelt vendor is evidence."""
+        sentinel = self._vendor("")
+        clearpass = self._product("ClearPass Policy Manager", sentinel)
+        cpes = [self._cpe("arubanetworks", "clearpass", f"6.{v}") for v in range(3)]
+        self._cve("CVE-2026-7100", clearpass, cpes, source="cna")
+
+        rebuild_product_cpe_vendor(self.conn)
+        self.assertEqual(self._slugs(clearpass), {"arubanetworks"})
+
+    def test_rebuilding_twice_on_one_connection_works(self) -> None:
+        """The SQL key function is registered once; re-registering raises."""
+        rebuild_product_cpe_vendor(self.conn)
+        rebuild_product_cpe_vendor(self.conn)
 
 
 class PhaseTests(VendorIndexTestCase):

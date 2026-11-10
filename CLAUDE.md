@@ -56,7 +56,7 @@ uv run vulnify-gather          # build/refresh the DB (ingest + enrich)
 uv run vulnify-mcp             # start the MCP server (stdio)
 uv run vulnify-mcp </dev/null  # smoke test — starts, exits clean on EOF
 uv run streamlit run explore/app.py
-uv run pytest                  # hermetic suite (currently 162 tests, ~10s)
+uv run pytest                  # hermetic suite (currently 166 tests, ~10s)
 ```
 
 Entry points: `vulnify-gather` → `vulnify.gather:run`, `vulnify-mcp` → `vulnify.mcp:run`.
@@ -172,12 +172,18 @@ Get these wrong and things break *silently*:
   `n/a` product accumulates 26,354 distinct CPE slugs, so without
   `MAX_SLUGS_PER_PRODUCT` it matches *every* vendor term (a search for `aruba`
   returned 144,237 CVEs instead of 640). `MIN_SLUG_EVIDENCE` kills lone strays.
+  A `source = 'cpe'` row counts **only its own vendor's CPEs** — counting the
+  other products' CPEs on a fanned-out multi-product CVE pushed PAN-OS past the
+  slug cap and out of the index (`paloaltonetworks` lost 127 of 410 CVEs).
 - **Placeholder CVEs fan out to every vulnerable CPE pair — don't "tidy" it back
   to one.** `db/placeholder_products.py` writes one `affected_product` row per
   `(vendor, product)` the CVE's `vulnerable = 1` CPEs name, stamped
   `source = 'cpe'`. Picking one hides the CVE from the others; resolving only
   single-pair CVEs (the old rule) hid 40,643 from everything. Platform CPEs
-  (`vulnerable = 0`) must stay out or a third-party app lands on Microsoft.
+  (`vulnerable = 0`) must stay out or a third-party app lands on Microsoft —
+  except a CVE with *no* vulnerable CPE and exactly one pair: NVD's 2003–2005
+  records flag the affected product itself `vulnerable = 0`, and dropping those
+  regressed 357 CVEs the old rule had resolved.
 - **`product_candidate` is a guess and must stay out of `affected_product`.**
   ~7% wrong vendor against CPE ground truth, and only after the
   vendor-immediately-before-product and no-self-named-pair guards — matching a

@@ -145,20 +145,28 @@ strongest evidence first, and each row says which one it came from:
 
 | Layer | Written to | `affected_product.source` | Coverage (2026-11-10 build) |
 |-------|-----------|---------------------------|-----------------------------|
-| cvelistV5 record names it | `affected_product` | `cna` | 475,242 rows |
-| `placeholder_products` phase: every `(vendor, product)` its **vulnerable** CPEs name | `affected_product` (+ `affected` `cve_vendor` edges) | `cpe` | 140,040 CVEs, 249,236 rows (the old one-pair rule reached ~99,800) |
-| `product_candidates` phase: `<vendor> <product>` named in the title/summary | `product_candidate` **only** | — | 658 of the 4,486 still unidentified (833 rows) |
+| cvelistV5 record names it | `affected_product` | `cna` | 474,885 rows |
+| `placeholder_products` phase: every `(vendor, product)` its **vulnerable** CPEs name | `affected_product` (+ `affected` `cve_vendor` edges) | `cpe` | 140,397 CVEs, 249,593 rows (the old one-pair rule reached ~99,800) |
+| `product_candidates` phase: `<vendor> <product>` named in the title/summary | `product_candidate` **only** | — | 543 of the 4,129 still unidentified (686 rows) |
 
 - **Fan out, never pick.** A multi-product CVE gets one row per vulnerable CPE
   pair. The earlier rule resolved only CVEs naming exactly one pair; it avoided
   a guess by resolving nothing and left 40,643 CVEs invisible (D-Link alone had
   989 of its 1,872 CVEs hidden).
 - **`vulnerable = 1` only.** Platform CPEs (the Windows an app runs on, the
-  hardware beside its `_firmware`) are not what the CVE affects.
+  hardware beside its `_firmware`) are not what the CVE affects. One exception:
+  a CVE with no vulnerable CPE and exactly one pair resolves to it — NVD's
+  2003–2005 records flag the affected product itself non-vulnerable (357 CVEs).
+- **The vendor index counts a `cpe` row's own vendor only.** Counting every
+  vendor on a fanned-out CVE pushed PAN-OS past the slug cap and out of the
+  index. The share floor still dilutes distro slugs on busy products (`git`'s
+  `fedoraproject` fell from 5.7% to 3.5%): across 50 vendors, 178 CVEs that name
+  the vendor in their own vulnerable CPEs stopped matching it, against ~43k
+  gained. Per-CVE vendor edges from CPE would close that; not built.
 - **Candidates never reach `affected_product`.** They are guesses (~7% wrong
   vendor, measured against CPE); `search_cves` ignores them and `get_cve` labels
   them. Precision table and rules: `vulnify/db/product_candidates.py`.
-- **What's left** (~3,800 CVEs, mostly 2024–2026 NVD backlog/`Deferred`) is
+- **What's left** (~3,600 CVEs, mostly 2024–2026 NVD backlog/`Deferred`) is
   reachable only by full-text search. Use a prefix query: a product written
   with its version glued on (`Relay3`) is one token, so `relay` misses it and
   `relay*` finds it.

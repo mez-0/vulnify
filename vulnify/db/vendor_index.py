@@ -1,6 +1,6 @@
 """Derived vendor index: CPE vendor slugs per product, and sentinel repointing.
 
-Two operations, both pure SQL over tables already in the DB (no network), so
+Two operations, both SQL over tables already in the DB (no network), so
 they can run either as a pipeline phase or from
 :func:`vulnify.db.migrate.apply_sqlite_migrations` against a shipped release DB.
 
@@ -18,6 +18,9 @@ from __future__ import annotations
 import sqlite3
 
 from loguru import logger
+
+from vulnify.constants import AFFECTED_SOURCE_CPE
+from vulnify.db.placeholder_products import _norm_key
 
 # A slug must own at least this share of a product's CPE evidence before we will
 # repoint the product onto it. Below the bar we leave the product on the sentinel
@@ -73,6 +76,39 @@ _SLUG_EXPR = "substr(cm.criteria, 11, instr(substr(cm.criteria, 11), ':') - 1)"
 # Wildcard / placeholder CPE components carry no vendor information.
 _DEGENERATE_SLUGS = ("", "*", "-", "n\\/a", "other")
 
+# 🚨 **A CPE-resolved row counts only its own vendor's CPEs.** A CNA-named
+# product's evidence is every CPE on its CVEs — the CVE is about that product.
+# A row the ``placeholder_products`` phase fanned out is one of *several*
+# products on a multi-product CVE; counting every vendor's CPEs pushed real
+# products past ``MAX_SLUGS_PER_PRODUCT`` — PAN-OS dropped out of the index
+# whole and ``paloaltonetworks`` lost 127 of its 410 CVEs (2026-11-10 build) —
+# and handed Acrobat Reader the ``apple``/``microsoft`` it runs on. What such a
+# row can teach the index is how NVD spells *its own* vendor (``dlink`` for
+# D-Link), so it counts the CVE's CPEs whose vendor slug matches the product's
+# vendor on the resolver's punctuation-blind key. Matching the product as well
+# was tried: a firmware row's own CPE is usually one row, under
+# ``MIN_SLUG_EVIDENCE``, and D-Link lost ``dlink``.
+_SQL_NORM_KEY = "vulnify_norm_key"
+
+
+def _register_norm_key(conn: sqlite3.Connection) -> None:
+    """Expose the resolver's matching key to SQL on this connection, once.
+
+    Re-registering is not idempotent: SQLite refuses to replace a function while
+    the connection has a statement open, so a second rebuild on the same
+    connection would raise.
+    """
+    try:
+        conn.execute(f"SELECT {_SQL_NORM_KEY}('')").fetchone()
+    except sqlite3.OperationalError:
+        conn.create_function(
+            _SQL_NORM_KEY, 1, lambda name: _norm_key(name or ""), deterministic=True)
+
+
+def _column_exists(cur: sqlite3.Cursor, table: str, column: str) -> bool:
+    cur.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cur.fetchall())
+
 
 def _table_exists(cur: sqlite3.Cursor, name: str) -> bool:
     cur.execute(
@@ -104,6 +140,15 @@ def rebuild_product_cpe_vendor(conn: sqlite3.Connection) -> int:
             return 0
 
     placeholders = ",".join("?" * len(_DEGENERATE_SLUGS))
+    own_vendor_only = ""
+    if _column_exists(cur, "affected_product", "source"):
+        _register_norm_key(conn)
+        own_vendor_only = f"""
+                  AND (ap.source IS NOT '{AFFECTED_SOURCE_CPE}'
+                       OR {_SQL_NORM_KEY}({_SLUG_EXPR}) = (
+                           SELECT {_SQL_NORM_KEY}(v.name) FROM product p
+                           JOIN vendor v ON v.vendor_id = p.vendor_id
+                           WHERE p.product_id = ap.product_id))"""
     cur.execute("DELETE FROM product_cpe_vendor")
     cur.execute(
         f"""
@@ -114,7 +159,7 @@ def rebuild_product_cpe_vendor(conn: sqlite3.Connection) -> int:
                 SELECT ap.product_id AS product_id, {_SLUG_EXPR} AS slug
                 FROM affected_product ap
                 JOIN cpe_match cm ON cm.cve_id = ap.cve_id
-                WHERE cm.criteria LIKE 'cpe:2.3:_:%'
+                WHERE cm.criteria LIKE 'cpe:2.3:_:%'{own_vendor_only}
             )
             WHERE slug NOT IN ({placeholders})
             GROUP BY product_id, slug
