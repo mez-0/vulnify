@@ -26,7 +26,7 @@ from vulnify.models.threat_intel import ThreatIntel
 from vulnify.models.vendor import Vendor
 
 import vulnify.db.vendor_index as mcp_module_vendor_index
-from vulnify.db.vendor_index import rebuild_product_cpe_vendor
+from vulnify.db.vendor_index import rebuild_cve_cpe_vendor, rebuild_product_cpe_vendor
 
 import vulnify.mcp as mcp_module
 
@@ -366,7 +366,7 @@ class VendorFilterTests(unittest.TestCase):
 
         self.vendors = {
             name: self._vendor(name)
-            for name in ("", "Hewlett Packard Enterprise", "Aruba.it", "Dell")
+            for name in ("", "Hewlett Packard Enterprise", "Aruba.it", "Dell", "Xen")
         }
         # Product name carries the vendor token; its vendor is the placeholder.
         self.p_named = self._product("Aruba ClearPass Policy Manager", "")
@@ -379,6 +379,7 @@ class VendorFilterTests(unittest.TestCase):
         self.p_hosting = self._product("Hosting Control Panel", "Aruba.it")
         self.p_stray = self._product("iDRAC Service Module", "Dell")
         self.p_placeholder = self._product("n/a", "")
+        self.p_xen = self._product("xen", "Xen")
 
         # One CVE per branch of the vendor predicate.
         self._cve("CVE-2020-0001", products=[self.p_named])
@@ -406,25 +407,47 @@ class VendorFilterTests(unittest.TestCase):
             vendors=[("Aruba.it", "primary")],
         )
         # A lone stray CPE occurrence must not make this a ClearPass/Aruba CVE.
+        # The real one (CVE-2018-11053) is a *platform* CPE: iDRAC "on" XenServer.
         self._cve(
             "CVE-2020-0005",
             products=[self.p_stray],
             vendors=[("Dell", "primary")],
-            cpes=["cpe:2.3:a:arubanetworks:clearpass_policy_manager:6.5:*:*:*:*:*:*:*"],
+            platform_cpes=[
+                "cpe:2.3:a:arubanetworks:clearpass_policy_manager:6.5:*:*:*:*:*:*:*"
+            ],
         )
         # The cvelistV5 placeholder product: shared by everything, so its CPE
-        # evidence names far too many vendors to mean anything.
+        # evidence names far too many vendors to mean anything. The Aruba CPEs
+        # sit on a *sibling* CVE: one CVE naming Aruba must not make every CVE
+        # on the shared product answer ``aruba``.
         self._cve(
             "CVE-2020-0006",
             products=[self.p_placeholder],
             cpes=[
                 f"cpe:2.3:a:vendor{i}:thing:1.0:*:*:*:*:*:*:*"
                 for i in range(mcp_module_vendor_index.MAX_SLUGS_PER_PRODUCT + 4)
-            ]
-            + ["cpe:2.3:a:arubanetworks:clearpass_policy_manager:1:*:*:*:*:*:*:*"],
+            ],
+        )
+        self._cve(
+            "CVE-2020-0007",
+            products=[self.p_placeholder],
+            cpes=[
+                "cpe:2.3:a:arubanetworks:clearpass_policy_manager:1:*:*:*:*:*:*:*",
+                "cpe:2.3:a:arubanetworks:clearpass_policy_manager:2:*:*:*:*:*:*:*",
+            ],
+        )
+        # A CNA-named upstream CVE NVD also lists for a distro. Fedora is one row
+        # against Xen's many, under every product-level evidence floor.
+        self._cve(
+            "CVE-2020-0008",
+            products=[self.p_xen],
+            vendors=[("Xen", "primary")],
+            cpes=[f"cpe:2.3:o:xen:xen:4.{i}:*:*:*:*:*:*:*" for i in range(40)]
+            + ["cpe:2.3:o:fedoraproject:fedora:31:*:*:*:*:*:*:*"],
         )
 
         rebuild_product_cpe_vendor(conn)
+        rebuild_cve_cpe_vendor(conn)
         conn.commit()
         mcp_module._store = self.store
 
@@ -456,6 +479,7 @@ class VendorFilterTests(unittest.TestCase):
         products: list[int],
         vendors: list[tuple[str, str]] | None = None,
         cpes: list[str] | None = None,
+        platform_cpes: list[str] | None = None,
     ) -> None:
         conn = self.store.connection
         conn.execute(
@@ -475,12 +499,13 @@ class VendorFilterTests(unittest.TestCase):
                 "INSERT INTO cve_vendor (cve_id, vendor_id, role) VALUES (?, ?, ?)",
                 (cve_id, self.vendors[vendor_name], role),
             )
-        for criteria in cpes or []:
-            conn.execute(
-                "INSERT INTO cpe_match (cve_id, criteria, match_criteria_id, "
-                "vulnerable) VALUES (?, ?, NULL, 1)",
-                (cve_id, criteria),
-            )
+        for vulnerable, criteria_list in ((1, cpes), (0, platform_cpes)):
+            for criteria in criteria_list or []:
+                conn.execute(
+                    "INSERT INTO cpe_match (cve_id, criteria, match_criteria_id, "
+                    "vulnerable) VALUES (?, ?, NULL, ?)",
+                    (cve_id, criteria, vulnerable),
+                )
 
     @staticmethod
     def _ids(rows: list[dict]) -> set[str]:
@@ -509,8 +534,34 @@ class VendorFilterTests(unittest.TestCase):
         self.assertIn("CVE-2020-0003", found)
 
     def test_branch_cve_vendor_edge_still_works(self) -> None:
-        """The original behaviour is preserved as one branch among four."""
+        """The original behaviour is preserved as one branch among five."""
         self.assertIn("CVE-2020-0004", self._ids(mcp_module.search_cves(vendor="aruba.it")))
+
+    def test_branch_per_cve_cpe_vendor(self) -> None:
+        """A distro NVD lists on an upstream CVE, too thin for the product index.
+
+        Regression for the 2026-11-10 build: 178 CVEs whose own vulnerable CPEs
+        named Fedora, Debian or Red Hat fell under the product-level share floor
+        and stopped answering a search for that vendor.
+        """
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM product_cpe_vendor WHERE product_id = ? "
+                "AND slug = 'fedoraproject'",
+                (self.p_xen,),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertIn("CVE-2020-0008", self._ids(mcp_module.search_cves(vendor="fedora")))
+
+    def test_per_cve_branch_does_not_widen_vendor_plus_product(self) -> None:
+        """Fedora owns no product called xen: the combined shape stays anchored."""
+        self.assertEqual(
+            mcp_module.search_cves(vendor="fedora", product="xen", limit=100), []
+        )
+
+    def test_a_cve_naming_the_vendor_on_a_shared_product_is_found(self) -> None:
+        self.assertIn("CVE-2020-0007", self._ids(mcp_module.search_cves(vendor="aruba")))
 
     # -- correlation -------------------------------------------------------
 
@@ -533,7 +584,7 @@ class VendorFilterTests(unittest.TestCase):
     # -- evidence quality guards ------------------------------------------
 
     def test_single_cpe_occurrence_is_not_vendor_evidence(self) -> None:
-        """One stray CPE must not re-badge Dell's product as Aruba's."""
+        """One stray platform CPE must not make Dell's CVE an Aruba one."""
         self.assertNotIn("CVE-2020-0005", self._ids(mcp_module.search_cves(vendor="aruba")))
 
     def test_placeholder_product_is_excluded_from_the_index(self) -> None:

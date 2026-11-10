@@ -94,6 +94,26 @@ CREATE TABLE IF NOT EXISTS product_cpe_vendor (
 
 CREATE INDEX IF NOT EXISTS idx_product_cpe_vendor_slug ON product_cpe_vendor (slug);
 
+-- Derived: every vendor slug a CVE's own ``vulnerable = 1`` CPEs name -- NVD
+-- saying "this vendor's product is affected by this CVE". Per-CVE, so it carries
+-- no guards: ``product_cpe_vendor`` above infers a vendor for *every* CVE of a
+-- product and must filter strays, but an edge here is about one CVE only. It is
+-- how a vendor search finds a CNA-named upstream CVE that NVD also lists for a
+-- distro (Xen CVEs answering ``fedoraproject``), which the product-level share
+-- floor dilutes away. Platform CPEs (``vulnerable = 0``) stay out. Cascades with
+-- its CVE; rebuilt wholesale by the ``vendor_index`` phase (and by
+-- ``migrate._ensure_cve_cpe_vendor`` for shipped DBs).
+CREATE TABLE IF NOT EXISTS cve_cpe_vendor (
+    cve_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    PRIMARY KEY (cve_id, slug),
+    FOREIGN KEY (cve_id) REFERENCES cve (cve_id) ON DELETE CASCADE
+);
+
+-- Covering: the vendor search scans slugs with a leading-wildcard LIKE and
+-- returns cve_id, so it reads this index and never touches the table.
+CREATE INDEX IF NOT EXISTS idx_cve_cpe_vendor_slug ON cve_cpe_vendor (slug, cve_id);
+
 -- Derived, opt-in: a product a CVE's own description names, for CVEs nothing
 -- structured identifies (the CNA wrote a placeholder AND NVD holds no vulnerable
 -- CPE). A *candidate*, not a fact -- deliberately kept out of affected_product so

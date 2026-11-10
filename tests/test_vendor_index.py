@@ -15,6 +15,7 @@ from vulnify.db.sqlite_store import SqliteCveStore
 from vulnify.db.vendor_index import (
     DOMINANCE_THRESHOLD,
     build_vendor_index,
+    rebuild_cve_cpe_vendor,
     rebuild_product_cpe_vendor,
     repoint_sentinel_products,
 )
@@ -54,7 +55,12 @@ class VendorIndexTestCase(unittest.TestCase):
         return int(cur.lastrowid)
 
     def _cve(
-        self, cve_id: str, product_id: int, cpes: list[str], source: str | None = None
+        self,
+        cve_id: str,
+        product_id: int,
+        cpes: list[str],
+        source: str | None = None,
+        platform: list[str] | None = None,
     ) -> None:
         self.conn.execute(
             "INSERT INTO cve (cve_id, title, summary, published, modified) "
@@ -67,12 +73,14 @@ class VendorIndexTestCase(unittest.TestCase):
             "VALUES (?, ?, 1, ?)",
             (cve_id, product_id, source),
         )
-        for criteria in cpes:
-            self.conn.execute(
-                "INSERT INTO cpe_match (cve_id, criteria, match_criteria_id, vulnerable) "
-                "VALUES (?, ?, NULL, 1)",
-                (cve_id, criteria),
-            )
+        for vulnerable, criteria_list in ((1, cpes), (0, platform or [])):
+            for criteria in criteria_list:
+                self.conn.execute(
+                    "INSERT INTO cpe_match "
+                    "(cve_id, criteria, match_criteria_id, vulnerable) "
+                    "VALUES (?, ?, NULL, ?)",
+                    (cve_id, criteria, vulnerable),
+                )
 
     def _vendor_of(self, product_id: int) -> str:
         row = self.conn.execute(
@@ -353,6 +361,91 @@ class FanOutEvidenceTests(VendorIndexTestCase):
         rebuild_product_cpe_vendor(self.conn)
 
 
+class CveEdgeTests(VendorIndexTestCase):
+    """``cve_cpe_vendor``: per-CVE vendor edges from the CVE's own vulnerable CPEs."""
+
+    def _edges(self, cve_id: str) -> set[str]:
+        return {
+            r[0]
+            for r in self.conn.execute(
+                "SELECT slug FROM cve_cpe_vendor WHERE cve_id = ?", (cve_id,)
+            )
+        }
+
+    def test_every_vulnerable_vendor_on_a_cve_gets_an_edge(self) -> None:
+        xen = self._product("xen", self._vendor("Xen"))
+        self._cve(
+            "CVE-2020-0101",
+            xen,
+            [self._cpe("xen", "xen", "4.1"), self._cpe("xen", "xen", "4.2"),
+             self._cpe("fedoraproject", "fedora", "31")],
+        )
+        rebuild_cve_cpe_vendor(self.conn)
+        self.assertEqual(self._edges("CVE-2020-0101"), {"xen", "fedoraproject"})
+
+    def test_a_share_diluted_distro_keeps_its_edge(self) -> None:
+        """The product index drops Fedora on a busy upstream; the edge must not."""
+        xen = self._product("xen", self._vendor("Xen"))
+        self._cve(
+            "CVE-2020-0102",
+            xen,
+            [self._cpe("xen", "xen", f"4.{i}") for i in range(60)]
+            + [self._cpe("fedoraproject", "fedora", v) for v in ("30", "31")],
+        )
+        rebuild_product_cpe_vendor(self.conn)
+        rebuild_cve_cpe_vendor(self.conn)
+
+        slugs = {r[0] for r in self.conn.execute(
+            "SELECT slug FROM product_cpe_vendor WHERE product_id = ?", (xen,))}
+        self.assertEqual(slugs, {"xen"})
+        self.assertIn("fedoraproject", self._edges("CVE-2020-0102"))
+
+    def test_platform_cpes_get_no_edge(self) -> None:
+        """CVE-2018-11053: Dell iDRAC "on" Citrix XenServer is not a Citrix CVE."""
+        idrac = self._product("iDRAC Service Module", self._vendor("Dell"))
+        self._cve(
+            "CVE-2020-0103",
+            idrac,
+            [self._cpe("dell", "idrac_service_module", "3.0")],
+            platform=[self._cpe("citrix", "xenserver", "7.1")],
+        )
+        rebuild_cve_cpe_vendor(self.conn)
+        self.assertEqual(self._edges("CVE-2020-0103"), {"dell"})
+
+    def test_wildcard_vendors_get_no_edge(self) -> None:
+        product = self._product("thing", self._vendor("acme"))
+        self._cve(
+            "CVE-2020-0104",
+            product,
+            ["cpe:2.3:a:*:thing:1:*:*:*:*:*:*:*", "cpe:2.3:a:-:thing:1:*:*:*:*:*:*:*",
+             self._cpe("acme", "thing", "1")],
+        )
+        rebuild_cve_cpe_vendor(self.conn)
+        self.assertEqual(self._edges("CVE-2020-0104"), {"acme"})
+
+    def test_edges_cascade_with_their_cve(self) -> None:
+        """Re-ingest deletes the CVE; its edges must go with it, not linger."""
+        product = self._product("thing", self._vendor("acme"))
+        self._cve("CVE-2020-0105", product, [self._cpe("acme", "thing", "1")])
+        rebuild_cve_cpe_vendor(self.conn)
+        self.conn.execute("DELETE FROM cve WHERE cve_id = 'CVE-2020-0105'")
+        self.assertEqual(self._edges("CVE-2020-0105"), set())
+
+    def test_rebuild_is_wholesale(self) -> None:
+        """A CPE NVD withdrew must not leave its edge behind."""
+        product = self._product("thing", self._vendor("acme"))
+        self._cve(
+            "CVE-2020-0106",
+            product,
+            [self._cpe("acme", "thing", "1"), self._cpe("initech", "thing", "1")],
+        )
+        self.assertEqual(rebuild_cve_cpe_vendor(self.conn), 2)
+        self.conn.execute(
+            "DELETE FROM cpe_match WHERE criteria LIKE 'cpe:2.3:a:initech:%'")
+        self.assertEqual(rebuild_cve_cpe_vendor(self.conn), 1)
+        self.assertEqual(self._edges("CVE-2020-0106"), {"acme"})
+
+
 class PhaseTests(VendorIndexTestCase):
     """The pipeline entry point, including its watermark write."""
 
@@ -383,7 +476,9 @@ class PhaseTests(VendorIndexTestCase):
             (VENDOR_INDEX_PHASE,),
         ).fetchone()
         self.assertTrue(str(completed))
-        self.assertEqual(str(watermark), f"{rows}:{moved}")
+        edges = self.conn.execute("SELECT COUNT(*) FROM cve_cpe_vendor").fetchone()[0]
+        self.assertEqual(edges, 1)
+        self.assertEqual(str(watermark), f"{rows}:{moved}:{edges}")
 
         # The phase committed, so the repoint is durable across a reopen.
         self.store.close()
@@ -489,6 +584,48 @@ class MigrationHealTests(unittest.TestCase):
         self.assertEqual(
             conn.execute("SELECT COUNT(*) FROM product_cpe_vendor").fetchone()[0], 1
         )
+        conn.close()
+
+
+    def test_migration_builds_cve_edges_on_a_legacy_db(self) -> None:
+        """A v2026.11.02-era DB has the product index but no per-CVE edges."""
+        from vulnify.db.migrate import apply_sqlite_migrations
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.executescript(self.schema_path.read_text(encoding="utf-8"))
+        conn.execute("DROP TABLE cve_cpe_vendor")
+        conn.executescript(
+            """
+            INSERT INTO vendor (vendor_id, name) VALUES (1, 'Xen');
+            INSERT INTO product (product_id, name, vendor_id, component)
+                VALUES (1, 'xen', 1, '');
+            INSERT INTO cve (cve_id, title, summary, published, modified) VALUES
+                ('CVE-2020-7111', '', '', '2020-06-01T00:00:00+00:00',
+                 '2020-06-01T00:00:00+00:00');
+            INSERT INTO affected_product (cve_id, product_id, affected)
+                VALUES ('CVE-2020-7111', 1, 1);
+            INSERT INTO cpe_match (cve_id, criteria, vulnerable) VALUES
+                ('CVE-2020-7111', 'cpe:2.3:o:xen:xen:4.1:*:*:*:*:*:*:*', 1),
+                ('CVE-2020-7111', 'cpe:2.3:o:fedoraproject:fedora:31:*:*:*:*:*:*:*', 1),
+                ('CVE-2020-7111', 'cpe:2.3:o:linux:linux_kernel:-:*:*:*:*:*:*:*', 0);
+            """
+        )
+        conn.commit()
+
+        apply_sqlite_migrations(conn)
+        conn.commit()
+        edges = lambda: {r[0] for r in conn.execute(  # noqa: E731
+            "SELECT slug FROM cve_cpe_vendor WHERE cve_id = 'CVE-2020-7111'")}
+        self.assertEqual(edges(), {"xen", "fedoraproject"})
+
+        # Second call must be a no-op: a hand-removed edge stays removed.
+        conn.execute("DELETE FROM cve_cpe_vendor WHERE slug = 'xen'")
+        conn.commit()
+        apply_sqlite_migrations(conn)
+        conn.commit()
+        self.assertEqual(edges(), {"fedoraproject"})
         conn.close()
 
 

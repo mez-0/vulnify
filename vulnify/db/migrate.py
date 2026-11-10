@@ -402,6 +402,7 @@ def apply_sqlite_migrations(conn: sqlite3.Connection) -> None:
         )
 
     _ensure_product_cpe_vendor(conn)
+    _ensure_cve_cpe_vendor(conn)
 
     _ensure_fts5_index(conn)
 
@@ -457,6 +458,54 @@ def _ensure_product_cpe_vendor(conn: sqlite3.Connection) -> None:
     conn.commit()
     logger.info(
         "Product/CPE-vendor index built in {elapsed:.1f}s",
+        elapsed=time.monotonic() - started,
+    )
+
+
+def _ensure_cve_cpe_vendor(conn: sqlite3.Connection) -> None:
+    """
+    Create ``cve_cpe_vendor`` and populate it from ``cpe_match``, so a release
+    DB built before the table existed gains per-CVE vendor search on first open.
+
+    Pure SQL over ``cpe_match`` (~15s on the full corpus). Runs at most once per
+    DB: guarded on the table being empty while vulnerable CPEs exist, the same
+    shape as :func:`_ensure_product_cpe_vendor`. The ``vendor_index`` phase keeps
+    it fresh after that.
+    """
+    from vulnify.db.vendor_index import rebuild_cve_cpe_vendor
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cve_cpe_vendor (
+            cve_id TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            PRIMARY KEY (cve_id, slug),
+            FOREIGN KEY (cve_id) REFERENCES cve (cve_id) ON DELETE CASCADE
+        )
+        """
+    )
+    if not _index_exists(cur, "idx_cve_cpe_vendor_slug"):
+        cur.execute(
+            "CREATE INDEX idx_cve_cpe_vendor_slug ON cve_cpe_vendor (slug, cve_id)"
+        )
+
+    if not _table_exists(cur, "cpe_match"):
+        return
+    cur.execute("SELECT 1 FROM cve_cpe_vendor LIMIT 1")
+    if cur.fetchone() is not None:
+        return
+    cur.execute("SELECT 1 FROM cpe_match WHERE vulnerable = 1 LIMIT 1")
+    if cur.fetchone() is None:
+        return
+
+    started = time.monotonic()
+    logger.info("Building per-CVE CPE-vendor edges (one-off)...")
+    edges = rebuild_cve_cpe_vendor(conn)
+    conn.commit()
+    logger.info(
+        "{edges:,} per-CVE CPE-vendor edges built in {elapsed:.1f}s",
+        edges=edges,
         elapsed=time.monotonic() - started,
     )
 

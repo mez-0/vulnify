@@ -131,8 +131,11 @@ def _vendor_product_predicate(
       product predicates describe *the same* product. Joining them independently
       (the old behaviour) matched a CVE that named Cisco and, separately, had an
       Apple product called iOS.
-    * **vendor only** — a ``UNION`` over the four ways a vendor string can reach
-      a CVE.
+    * **vendor only** — a ``UNION`` over the five ways a vendor string can reach
+      a CVE. The fifth, ``cve_cpe_vendor``, is per-CVE: NVD lists that vendor's
+      product as vulnerable for *this* CVE, even when the product it is filed
+      under belongs to someone else (a Xen CVE NVD also lists for Fedora).
+      It is not in the vendor+product shape, which stays anchored on one product.
     * **product only** — the original predicate.
 
     Emitted as an uncorrelated ``IN`` subquery rather than a joined CTE, and that
@@ -178,8 +181,9 @@ def _vendor_product_predicate(
                     SELECT vendor_id FROM vendor WHERE lower(name) LIKE ?)
           UNION SELECT product_id FROM product_cpe_vendor WHERE lower(slug) LIKE ?
         )
+  UNION SELECT ccv.cve_id FROM cve_cpe_vendor ccv WHERE lower(ccv.slug) LIKE ?
 )"""
-        return sql, [v_term, v_term, v_term, v_term]
+        return sql, [v_term, v_term, v_term, v_term, v_term]
 
     sql = """c.cve_id IN (
     SELECT ap.cve_id FROM affected_product ap
@@ -309,7 +313,9 @@ def search_cves(
 
     :param vendor: Case-insensitive substring match, resolved against the CVE's
         vendor edges, the owning vendor of any affected product, the product name
-        itself, and the vendor component of NVD's CPE strings. Deliberately
+        itself, and the vendor component of NVD's CPE strings — including any
+        vendor whose product NVD lists as vulnerable to this CVE, so
+        ``vendor="debian"`` finds kernel CVEs NVD lists for Debian. Deliberately
         broad — a vendor filter that returns a confident empty set on a product
         that has CVEs is the worst failure this tool can have. So
         ``vendor="vmware"`` also matches Lenovo's "LXCI for VMware".

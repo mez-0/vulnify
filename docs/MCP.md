@@ -85,7 +85,7 @@ Structured filter, ordered `published DESC`. All params optional:
 
 | Param | Type | Meaning |
 |--|--|--|
-| `vendor` | str | case-insensitive substring, resolved four ways — see below |
+| `vendor` | str | case-insensitive substring, resolved five ways — see below |
 | `product` | str | case-insensitive substring on product name |
 | `cwe` | str | exact CWE id, e.g. `CWE-79` |
 | `kev_only` | bool | only CISA-KEV-listed CVEs |
@@ -108,9 +108,17 @@ confident empty set. A CVE therefore matches `vendor=X` if **any** of:
 1. one of its `cve_vendor` edges names a vendor matching `X`;
 2. an affected product is *owned* by a vendor matching `X`;
 3. an affected product's own **name** contains `X` (`Aruba ClearPass Policy Manager`);
-4. an affected product's **CPE vendor slug** matches `X` (`cpe:2.3:a:arubanetworks:…`).
+4. an affected product's **CPE vendor slug** matches `X` (`cpe:2.3:a:arubanetworks:…`);
+5. one of the CVE's **own vulnerable CPEs** has a vendor slug matching `X` — NVD
+   says that vendor's product is affected, even when the CVE is filed under
+   someone else's product (a Xen CVE NVD also lists for Fedora, an Android CVE a
+   CNA filed under `n/a`).
 
-Branch 4 reads `product_cpe_vendor` — see [SCHEMA.md](SCHEMA.md#applicability).
+Branch 4 reads `product_cpe_vendor`, branch 5 reads `cve_cpe_vendor` — see
+[SCHEMA.md](SCHEMA.md#applicability). Branch 4 is per product and guarded, so a
+minority vendor on a busy product can fall under its share floor; branch 5 is
+per CVE and catches it. Platform CPEs (the Windows an app runs on) reach
+neither.
 
 **This is deliberately broad.** `vendor="vmware"` also returns Lenovo's
 "LXCI for VMware" and the Jenkins VMware plugin. For a vulnerability lookup an
@@ -118,7 +126,8 @@ over-broad answer is recoverable and a false empty set is not, so the filter
 errs outward — the same under-claim discipline as the exploit tri-state.
 
 When both `vendor` and `product` are given they must describe the **same**
-affected product. (They used to be independent joins, so `vendor="cisco",
+affected product, so branch 5 does not apply: `vendor="fedora", product="xen"`
+is empty because Fedora owns no product called xen. (They used to be independent joins, so `vendor="cisco",
 product="ios"` matched a CVE that named Cisco and, separately, listed an Apple
 product called iOS.)
 

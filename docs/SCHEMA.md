@@ -98,6 +98,14 @@ migrations and the FTS5 backfill live in `vulnify/db/migrate.py`.
   slugs below `MIN_SLUG_EVIDENCE` / `MIN_SLUG_SHARE` are ignored as strays.
   **Never hand-edit it** — it is regenerated, and it is keyed by `product_id`, so
   don't hold external references to those ids.
+- **`cve_cpe_vendor`** — **derived**: `(cve_id, slug)`, one row per vendor a
+  CVE's own `vulnerable = 1` CPEs name. Branch 5 of the MCP vendor filter. Where
+  `product_cpe_vendor` infers vendors for a *product* and needs guards, this is
+  per-CVE and needs none: it is how a search for `fedoraproject` finds a Xen CVE
+  NVD also lists for Fedora, which the product-level share floor dilutes away.
+  Platform CPEs (`vulnerable = 0`) are excluded. Cascades with its CVE; rebuilt
+  wholesale by the `vendor_index` phase and once by
+  `migrate._ensure_cve_cpe_vendor` for an older DB (~15s).
 
 ## References & tags
 
@@ -132,7 +140,7 @@ migrations and the FTS5 backfill live in `vulnify/db/migrate.py`.
 - **KEV count:** `WHERE listed = 1`, never bare `COUNT(*)`.
 - **Reference tags:** join via `reference.id`, not a `cve_id` on `reference_tag`.
 - **Vendor filtering:** never `WHERE lower(v.name) LIKE …` on its own — the
-  sentinel vendor makes that silently under-return. Go through the four-branch
+  sentinel vendor makes that silently under-return. Go through the five-branch
   predicate in `mcp._vendor_product_predicate`.
 - **Exploit tri-state:** filter `public_poc IS NOT NULL` before treating the
   value as boolean, or you'll conflate "not assessed" with "none found".

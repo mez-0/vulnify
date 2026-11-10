@@ -9,7 +9,7 @@ Deep-dive docs live in [`docs/`](docs/) — read the relevant one before working
 
 - **[docs/DATASOURCES.md](docs/DATASOURCES.md)** — the eight upstream sources, endpoints, what each contributes, licensing.
 - **[docs/PIPELINE.md](docs/PIPELINE.md)** — ingestion → enrichment flow, watermarks/resume, the cascade+heal persistence model, tri-state discipline.
-- **[docs/SCHEMA.md](docs/SCHEMA.md)** — the 22-table schema, relationships, query gotchas.
+- **[docs/SCHEMA.md](docs/SCHEMA.md)** — the 23-table schema, relationships, query gotchas.
 - **[docs/MCP.md](docs/MCP.md)** — the `vulnify-mcp` server, its 8 tools, setup, troubleshooting.
 - **[docs/EXPLORE.md](docs/EXPLORE.md)** — the Streamlit explorer.
 
@@ -56,7 +56,7 @@ uv run vulnify-gather          # build/refresh the DB (ingest + enrich)
 uv run vulnify-mcp             # start the MCP server (stdio)
 uv run vulnify-mcp </dev/null  # smoke test — starts, exits clean on EOF
 uv run streamlit run explore/app.py
-uv run pytest                  # hermetic suite (currently 166 tests, ~10s)
+uv run pytest                  # hermetic suite (currently 176 tests, ~10s)
 ```
 
 Entry points: `vulnify-gather` → `vulnify.gather:run`, `vulnify-mcp` → `vulnify.mcp:run`.
@@ -90,13 +90,13 @@ vulnify/
 │   ├── vendor_index.py  # `vendor_index` phase — refresh the CPE-vendor rollup
 │   └── enrichment_resume.py
 └── db/
-    ├── schema.sql       # 22-table normalised schema + FTS5 index
+    ├── schema.sql       # 23-table normalised schema + FTS5 index
     ├── sqlite_store.py  # connection + upsert API (WAL, foreign_keys ON)
     ├── cve_upsert.py    # CVE/vendor/product write registry (delete-and-rebuild)
     ├── migrate.py       # idempotent additive migrations + FTS5 backfill
     ├── placeholder_products.py # per-CVE CPE → every (vendor, product) fan-out
     ├── product_candidates.py # `<vendor> <product>` prose matcher (guarded)
-    ├── vendor_index.py  # product_cpe_vendor build + sentinel-vendor repoint
+    ├── vendor_index.py  # product_cpe_vendor + cve_cpe_vendor build, sentinel repoint
     ├── pipeline_state.py# per-phase watermark read/write
     ├── readonly.py      # read-only sqlite helper (NOTE: currently unused by mcp.py)
     └── sql_conversion.py# model ↔ row helpers
@@ -164,7 +164,7 @@ Get these wrong and things break *silently*:
   and substitutes `Vendor()` — the *product* is still written, so ~11% of
   `product` rows and 44% of CVEs hang off that one row. `lower(name) LIKE '%x%'`
   can never match `''`, so **never filter vendors by name alone** — that bug
-  returned 0 CVEs for a product with 152. Use the four-branch predicate in
+  returned 0 CVEs for a product with 152. Use the five-branch predicate in
   `mcp._vendor_product_predicate`, and exclude the sentinel from any
   vendor-facing aggregate (`trim(name) <> ''`).
 - **`product_cpe_vendor` is derived, guarded, and rebuilt — never hand-edited.**
@@ -175,6 +175,14 @@ Get these wrong and things break *silently*:
   A `source = 'cpe'` row counts **only its own vendor's CPEs** — counting the
   other products' CPEs on a fanned-out multi-product CVE pushed PAN-OS past the
   slug cap and out of the index (`paloaltonetworks` lost 127 of 410 CVEs).
+- **`cve_cpe_vendor` is per-CVE and unguarded on purpose — don't add the
+  product index's guards to it.** One edge per vendor a CVE's own
+  `vulnerable = 1` CPEs name; nothing smears, so there are no strays to filter.
+  It exists because the product index's share floor drops a distro off a busy
+  upstream product (`git`'s `fedoraproject` at 3.5%): it restored 178 such
+  losses and found 13,661 CVEs across 50 vendors no search had ever returned.
+  It is a vendor-only branch; the vendor+product shape stays anchored on one
+  product.
 - **Placeholder CVEs fan out to every vulnerable CPE pair — don't "tidy" it back
   to one.** `db/placeholder_products.py` writes one `affected_product` row per
   `(vendor, product)` the CVE's `vulnerable = 1` CPEs name, stamped
@@ -216,7 +224,7 @@ same data. A change that doesn't move the pinned cvelistV5 `ZIP_URL` is a `.N`
 patch, so the tag date stays on the *data* even when the work lands months later
 (`v2026.07.25.1` was cut on 2026-08-20). `pyproject.toml` version follows SemVer
 independently. Each release ships exactly two assets — `vulnify.db.zst` (FTS5
-**and** `product_cpe_vendor` pre-built, so consumers pay no first-start build
+**and** `product_cpe_vendor` / `cve_cpe_vendor` pre-built, so consumers pay no first-start build
 cost) and `schema.sql`. **GitHub caps release assets at 2 GiB** — always ship the
 zstd'd DB, never the raw `.db`. See [README](README.md#releases).
 

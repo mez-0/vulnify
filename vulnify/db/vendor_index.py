@@ -1,6 +1,6 @@
-"""Derived vendor index: CPE vendor slugs per product, and sentinel repointing.
+"""Derived vendor index: CPE vendor slugs per product and per CVE, and sentinel repointing.
 
-Two operations, both SQL over tables already in the DB (no network), so
+Three operations, all SQL over tables already in the DB (no network), so
 they can run either as a pipeline phase or from
 :func:`vulnify.db.migrate.apply_sqlite_migrations` against a shipped release DB.
 
@@ -183,6 +183,56 @@ def rebuild_product_cpe_vendor(conn: sqlite3.Connection) -> int:
         ),
     )
     cur.execute("SELECT COUNT(*) FROM product_cpe_vendor")
+    return int(cur.fetchone()[0])
+
+
+def rebuild_cve_cpe_vendor(conn: sqlite3.Connection) -> int:
+    """
+    Rebuild ``cve_cpe_vendor``: each CVE's own vulnerable CPE vendor slugs.
+
+    The per-CVE counterpart to :func:`rebuild_product_cpe_vendor`, and
+    deliberately unguarded. That index answers "which vendors does this
+    *product* belong to" and applies the answer to every CVE of the product, so
+    strays and platforms must be filtered by share. This one answers "which
+    vendors does NVD say *this CVE* affects" — one edge per CVE, nothing to smear.
+    The share floor there is what drops a distro off a busy upstream product
+    (``git``'s ``fedoraproject`` at 3.5% of its evidence); against the
+    2026-11-10 build, this table restores all 178 such losses and finds 13,661
+    CVEs across 50 vendors that no vendor search ever returned.
+
+    ``vulnerable = 1`` only. A platform CPE is the OS the product runs on —
+    Dell's iDRAC Service Module "on" Citrix XenServer (CVE-2018-11053) is not a
+    Citrix CVE.
+
+    Wholesale for the same reason as :func:`rebuild_product_cpe_vendor`. The
+    caller owns the transaction — this does not commit.
+
+    :param conn: An open SQLite connection.
+    :type conn: sqlite3.Connection
+    :return: Number of ``(cve_id, slug)`` edges written.
+    :rtype: int
+    """
+    cur = conn.cursor()
+    for table in ("cve_cpe_vendor", "cpe_match"):
+        if not _table_exists(cur, table):
+            return 0
+
+    placeholders = ",".join("?" * len(_DEGENERATE_SLUGS))
+    cur.execute("DELETE FROM cve_cpe_vendor")
+    cur.execute(
+        f"""
+        INSERT INTO cve_cpe_vendor (cve_id, slug)
+        SELECT DISTINCT cve_id, slug
+        FROM (
+            SELECT cm.cve_id AS cve_id, {_SLUG_EXPR} AS slug
+            FROM cpe_match cm
+            WHERE cm.vulnerable = 1 AND cm.criteria LIKE 'cpe:2.3:_:%'
+        )
+        WHERE slug NOT IN ({placeholders})
+        """,
+        _DEGENERATE_SLUGS,
+    )
+    cur.execute("SELECT COUNT(*) FROM cve_cpe_vendor")
     return int(cur.fetchone()[0])
 
 
@@ -390,6 +440,7 @@ __all__ = [
     "MIN_SLUG_EVIDENCE",
     "MIN_SLUG_SHARE",
     "build_vendor_index",
+    "rebuild_cve_cpe_vendor",
     "rebuild_product_cpe_vendor",
     "repoint_sentinel_products",
 ]

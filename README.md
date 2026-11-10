@@ -39,7 +39,7 @@ Deeper references live in [`docs/`](docs/):
 
 - **[Data sources](docs/DATASOURCES.md)** — every upstream feed, endpoint, and licence.
 - **[Pipeline](docs/PIPELINE.md)** — ingestion → enrichment, watermarks/resume, the cascade+heal model, tri-state discipline.
-- **[Schema](docs/SCHEMA.md)** — the 22-table layout and query gotchas.
+- **[Schema](docs/SCHEMA.md)** — the 23-table layout and query gotchas.
 - **[MCP server](docs/MCP.md)** — the 8 tools, per-agent setup, troubleshooting.
 - **[Explorer](docs/EXPLORE.md)** — the Streamlit dashboard, tab by tab.
 
@@ -199,7 +199,7 @@ vulnify/
 │   │   ├── enrichment.py     # phase orchestrator
 │   │   └── enrichment_resume.py
 │   └── db/
-│       ├── schema.sql        # 22-table normalised schema + FTS5 index
+│       ├── schema.sql        # 23-table normalised schema + FTS5 index
 │       ├── sqlite_store.py   # connection + upsert API
 │       ├── readonly.py       # shared read-only sqlite3 helper
 │       ├── cve_upsert.py     # CVE/vendor/product writes
@@ -378,7 +378,7 @@ Edit `~/.cursor/mcp.json` (or the project-local `.cursor/mcp.json`):
 | Tool | What it does |
 |--|--|
 | `get_cve(cve_id)` | Full hydrated CVE record — CVSS, KEV, EPSS, exploits, references, CWEs, affected products, plus an `artefacts` evidence list. |
-| `search_cves(...)` | Filter by vendor / product / cwe / kev_only / min_cvss / min_epss / year. The `vendor` filter resolves four ways (vendor edge, product owner, product name, CPE vendor slug) — see [MCP.md](docs/MCP.md#how-the-vendor-filter-resolves). |
+| `search_cves(...)` | Filter by vendor / product / cwe / kev_only / min_cvss / min_epss / year. The `vendor` filter resolves five ways (vendor edge, product owner, product name, product CPE vendor slug, the CVE's own vulnerable CPE vendors) — see [MCP.md](docs/MCP.md#how-the-vendor-filter-resolves). |
 | `list_vendors(query, limit)` | Vendor names with CVE / product counts and their NVD CPE slugs. Use it to disambiguate a vendor term before trusting an empty result. |
 | `exploits_for(cve_id)` | Concrete exploit artefacts (Nuclei / Exploit-DB / Metasploit) with source, stable id, url, and `exact`/`parsed` confidence. |
 | `references_for(cve_id, tag)` | Reference URLs with their tags, optionally filtered to one tag (e.g. `patch`, `exploit`). |
@@ -467,7 +467,8 @@ Each release ships:
 
 - **`vulnify.db.zst`** — the full SQLite DB, zstd-compressed. Includes the
   FTS5 index pre-built from `v2026.05.21.1` onwards, and the
-  `product_cpe_vendor` vendor index pre-built from `v2026.07.25.1` onwards, so
+  `product_cpe_vendor` vendor index pre-built from `v2026.07.25.1` onwards
+  (and the per-CVE `cve_cpe_vendor` from `v2026.11.02.1`), so
   `vulnify-mcp` is ready to serve immediately on first start rather than
   spending ~40s building them. Decompress with `zstd -d vulnify.db.zst`.
 - **`schema.sql`** — the DDL, in case you only want the structure.

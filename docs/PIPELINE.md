@@ -13,7 +13,7 @@ vulnify-gather
         ├─ kev          CISA Known Exploited Vulnerabilities
         ├─ nvd          NVD 2.0: CVSS, CPE, status, refs (incremental; full after an ingest)
         ├─ placeholder_products  give `n/a` CVEs every product their vulnerable CPEs name (local)
-        ├─ vendor_index product_cpe_vendor rollup (local; needs nvd's cpe_match)
+        ├─ vendor_index product_cpe_vendor + per-CVE cve_cpe_vendor (local; needs nvd's cpe_match)
         ├─ product_candidates    opt-in description-named products for what's left (local)
         ├─ epss         EPSS probability + percentile (batched)
         ├─ osv          OSV package mappings (per-CVE)
@@ -160,9 +160,13 @@ strongest evidence first, and each row says which one it came from:
 - **The vendor index counts a `cpe` row's own vendor only.** Counting every
   vendor on a fanned-out CVE pushed PAN-OS past the slug cap and out of the
   index. The share floor still dilutes distro slugs on busy products (`git`'s
-  `fedoraproject` fell from 5.7% to 3.5%): across 50 vendors, 178 CVEs that name
-  the vendor in their own vulnerable CPEs stopped matching it, against ~43k
-  gained. Per-CVE vendor edges from CPE would close that; not built.
+  `fedoraproject` fell from 5.7% to 3.5%), which cost 178 CVEs whose own
+  vulnerable CPEs name the vendor.
+- **`cve_cpe_vendor` closes that per CVE.** One edge per vendor a CVE's own
+  vulnerable CPEs name (365,513 edges), read as the fifth vendor-search branch.
+  It restored all 178 and found 13,661 CVEs across 50 vendors no vendor search
+  had ever returned (Debian +3,566, Google +3,013 mostly Android filed under
+  `n/a`, Fedora +2,123). Built in ~10s inside the `vendor_index` phase.
 - **Candidates never reach `affected_product`.** They are guesses (~7% wrong
   vendor, measured against CPE); `search_cves` ignores them and `get_cve` labels
   them. Precision table and rules: `vulnify/db/product_candidates.py`.
